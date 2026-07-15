@@ -1,15 +1,28 @@
-# Craic HQ v2
+# Craic HQ v3 — Local-first V1
 
-Adds:
-- Editable Master Recipes
-- Separate supplier delivery lots
-- Mandatory supplier batch codes
-- Exact ingredient-lot selection during production
-- FIFO packaging deduction
-- Recipe snapshots on each finished batch
-- Finished batch stock
-- Supplier lot → finished batch → customer traceability
-- Existing local data migration where possible
+Included:
+- Finished stock and finished batch balances
+- Ingredients and packaging
+- Separate supplier lots and supplier batch codes
+- Editable master recipes
+- Production wizard and exact lot selection
+- Automatic ingredient and packaging deductions
+- Finished batch generation
+- Customers, orders and customer batch allocation
+- Full traceability
+- HACCP logs
+- Individual blend costing
+- Production cost snapshots
+- Inventory valuation
+- Low-stock reports
+- Settings and selling prices
+- Automatic activity/audit log
+- Printable reports
+- Backup/import
+- Offline PWA support
 
-Upload all files to the root of the GitHub repository and replace the existing versions.
-After GitHub Pages redeploys, refresh the site. On iPhone, close and reopen the Home Screen app.
+## Still not included
+Live cloud sync between devices. This requires an external cloud database account and credentials.
+
+## Update
+Upload all files to the root of your GitHub repository, replacing the current files.

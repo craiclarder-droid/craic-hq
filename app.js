@@ -43,7 +43,7 @@ const seed = {
     LH:{salt:26,lemon:7,garlic:15,oregano:4,thyme:4,parsley:5,blackpepper:2,onion:5,brownsugar:2}
   },
   ingredientBatches:[],
-  productionRuns:[], customers:[], orders:[], deliveries:[], movements:[], haccp:[]
+  productionRuns:[], customers:[], orders:[], deliveries:[], movements:[], haccp:[], activity:[], settings:{businessName:"Craic Larder",address:"",ehoNumber:"",defaultOperator:"James",labourPerBatch:0}
 };
 
 let db = loadAndMigrate();
@@ -75,6 +75,7 @@ function lot(id){return db.ingredientBatches.find(x=>x.id===id)}
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[m]))}
 function options(items,valueKey,labelKey,selected=""){return items.map(x=>`<option value="${esc(x[valueKey])}" ${String(x[valueKey])===String(selected)?"selected":""}>${esc(x[labelKey])}</option>`).join("")}
 function fmt(n){return Number(n||0).toLocaleString(undefined,{maximumFractionDigits:3})}
+function money(n){return "£"+Number(n||0).toFixed(2)}
 function batchCode(blendId,date){
   const d=new Date(date+"T12:00:00");
   const base=`${blendId}-${String(d.getDate()).padStart(2,"0")}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getFullYear()).slice(-2)}`;
@@ -89,22 +90,65 @@ function recalcResourceQty(resourceId){
   const r=resource(resourceId);
   if(r) r.qty=availableLots(resourceId).reduce((sum,b)=>sum+Number(b.remaining||0),0);
 }
+function logActivity(type,details,date=today()){
+  if(!Array.isArray(db.activity)) db.activity=[];
+  db.activity.push({id:uid("ACT"),date,time:new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}),type,details});
+}
+function resourceValue(type){
+  return db.resources.filter(r=>r.type===type).reduce((sum,r)=>sum+(Number(r.qty||0)*Number(r.costPerUnit||0)),0);
+}
+function blendCost(blendId){
+  const rec=db.recipes[blendId]||{};
+  const ingredients=Object.entries(rec).map(([rid,qty])=>({rid,qty:Number(qty),cost:Number(resource(rid)?.costPerUnit||0)*Number(qty)}));
+  const packagingIds=["pouch","frontlabel","backlabel","desiccant"];
+  const packaging=packagingIds.map(rid=>({rid,qty:1,cost:Number(resource(rid)?.costPerUnit||0)}));
+  const ingredientCost=ingredients.reduce((a,b)=>a+b.cost,0);
+  const packagingCost=packaging.reduce((a,b)=>a+b.cost,0);
+  return {ingredients,packaging,ingredientCost,packagingCost,total:ingredientCost+packagingCost};
+}
+function finishedStockCostValue(){
+  return db.stock.reduce((sum,s)=>sum+(Number(s.qty||0)*blendCost(s.blendId).total),0);
+}
+function finishedStockRetailValue(){
+  return db.stock.reduce((sum,s)=>sum+(Number(s.qty||0)*Number(blend(s.blendId)?.retail||0)),0);
+}
+
 function nav(v){currentView=v;preparedProduction=null;render()}
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>nav(b.dataset.view));
 document.getElementById("menuBtn").onclick=()=>document.getElementById("nav").scrollIntoView({behavior:"smooth"});
 
 function render(){
-  const map={dashboard,stock:stockView,resources:resourcesView,recipes:recipesView,production:productionView,orders:ordersView,customers:customersView,deliveries:deliveriesView,traceability:traceabilityView,haccp:haccpView,backup:backupView};
+  const map={dashboard,stock:stockView,resources:resourcesView,recipes:recipesView,production:productionView,orders:ordersView,customers:customersView,deliveries:deliveriesView,costing:costingView,reports:reportsView,traceability:traceabilityView,haccp:haccpView,settings:settingsView,backup:backupView};
   (map[currentView]||dashboard)();
 }
 function dashboard(){
-  const low=db.stock.filter(s=>s.qty<=s.low).length;
+  const lowBlends=db.stock.filter(s=>s.qty<=s.low).length;
+  const lowResources=db.resources.filter(r=>Number(r.qty||0)<=Number(r.reorder||0)&&Number(r.reorder||0)>0).length;
+  const rawValue=resourceValue("Ingredient");
+  const packagingValue=resourceValue("Packaging");
+  const finishedCost=finishedStockCostValue();
+  const finishedRetail=finishedStockRetailValue();
+  const recent=(db.activity||[]).slice(-10).reverse();
   app.innerHTML=`<div class="grid">
   <section class="card"><div class="muted">Finished pouches</div><div class="kpi">${db.stock.reduce((a,b)=>a+Number(b.qty),0)}</div></section>
-  <section class="card"><div class="muted">Low-stock blends</div><div class="kpi">${low}</div></section>
-  <section class="card"><div class="muted">Production batches</div><div class="kpi">${db.productionRuns.length}</div></section>
-  <section class="card"><div class="muted">Ingredient lots</div><div class="kpi">${db.ingredientBatches.filter(b=>b.remaining>0).length}</div></section>
-  </div><section class="card"><h2>Latest audit activity</h2>${movementTable(db.movements.slice(-12).reverse())}</section>`;
+  <section class="card"><div class="muted">Low-stock blends</div><div class="kpi">${lowBlends}</div></section>
+  <section class="card"><div class="muted">Low resources</div><div class="kpi">${lowResources}</div></section>
+  <section class="card"><div class="muted">Open ingredient lots</div><div class="kpi">${db.ingredientBatches.filter(b=>b.remaining>0).length}</div></section>
+  </div>
+  <div class="grid">
+  <section class="card"><h3>Inventory value</h3>
+    <div class="metric-row"><span>Ingredients</span><b>${money(rawValue)}</b></div>
+    <div class="metric-row"><span>Packaging</span><b>${money(packagingValue)}</b></div>
+    <div class="metric-row"><span>Finished stock at cost</span><b>${money(finishedCost)}</b></div>
+    <div class="metric-row"><span>Finished stock retail value</span><b>${money(finishedRetail)}</b></div>
+  </section>
+  <section class="card"><h3>Records</h3>
+    <div class="metric-row"><span>Production batches</span><b>${db.productionRuns.length}</b></div>
+    <div class="metric-row"><span>Completed orders</span><b>${db.orders.length}</b></div>
+    <div class="metric-row"><span>HACCP records</span><b>${db.haccp.length}</b></div>
+    <div class="metric-row"><span>Stock movements</span><b>${db.movements.length}</b></div>
+  </section></div>
+  <section class="card"><h2>Recent activity</h2>${recent.length?`<table><tr><th>Date</th><th>Time</th><th>Action</th><th>Details</th></tr>${recent.map(a=>`<tr><td>${a.date}</td><td>${a.time}</td><td>${esc(a.type)}</td><td>${esc(a.details)}</td></tr>`).join("")}</table>`:"<p>No activity recorded yet.</p>"}</section>`;
 }
 function stockView(){
   app.innerHTML=`<section class="card"><h2>Finished Stock</h2>
@@ -120,15 +164,16 @@ window.saveLow=id=>{stock(id).low=Number(document.getElementById("low-"+id).valu
 function resourcesView(){
   app.innerHTML=`<section class="card"><h2>Ingredients & Packaging</h2>
   <div class="notice">Stock totals are calculated from delivery lots. Record new stock through Deliveries so supplier batch codes remain traceable.</div>
-  <table><tr><th>Resource</th><th>Type</th><th>Available</th><th>Unit</th><th>Supplier</th><th>Cost/unit</th><th></th></tr>
+  <table><tr><th>Resource</th><th>Type</th><th>Available</th><th>Unit</th><th>Supplier</th><th>Cost/unit</th><th>Reorder at</th><th></th></tr>
   ${db.resources.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.type}</td><td>${fmt(r.qty)}</td><td>${r.unit}</td>
   <td><input id="rs-${r.id}" value="${esc(r.supplier||"")}"></td>
   <td><input type="number" step="0.00001" id="rc-${r.id}" value="${r.costPerUnit||0}"></td>
+  <td><input type="number" step="0.01" id="rr-${r.id}" value="${r.reorder||0}" title="Reorder level"></td>
   <td><button onclick="saveResource('${r.id}')">Save</button></td></tr>`).join("")}</table></section>
   <section class="card"><h2>Open Supplier Lots</h2><table><tr><th>Resource</th><th>Supplier batch</th><th>Received</th><th>Remaining</th><th>Supplier</th></tr>
   ${db.ingredientBatches.filter(b=>b.remaining>0).map(b=>`<tr><td>${resource(b.resourceId)?.name||""}</td><td><b>${esc(b.supplierBatch)}</b></td><td>${b.receivedDate}</td><td>${fmt(b.remaining)} ${resource(b.resourceId)?.unit||""}</td><td>${esc(b.supplier)}</td></tr>`).join("")}</table></section>`;
 }
-window.saveResource=id=>{const r=resource(id);r.supplier=document.getElementById("rs-"+id).value;r.costPerUnit=Number(document.getElementById("rc-"+id).value);save();render()}
+window.saveResource=id=>{const r=resource(id);r.supplier=document.getElementById("rs-"+id).value;r.costPerUnit=Number(document.getElementById("rc-"+id).value);r.reorder=Number(document.getElementById("rr-"+id).value);save();logActivity("Resource updated",r.name);render()}
 
 function recipesView(){
   const selected=document.getElementById("recipeBlend")?.value||db.blends[0].id;
@@ -167,7 +212,7 @@ function productionView(){
   <div class="row"><div><label>Date</label><input type="date" id="prDate" value="${today()}"></div>
   <div><label>Blend</label><select id="prBlend">${options(db.blends,"id","name")}</select></div>
   <div><label>Pouches made</label><input type="number" id="prQty" min="1" value="10"></div>
-  <div><label>Completed by</label><input id="prBy" value="James"></div></div>
+  <div><label>Completed by</label><input id="prBy" value="${esc(db.settings?.defaultOperator||"James")}"></div></div>
   <label>Notes</label><textarea id="prNotes"></textarea>
   <div class="actions"><button onclick="prepareProduction()">Calculate requirements & choose batches</button></div></section>
   <div id="productionPlan"></div>
@@ -233,7 +278,7 @@ window.completeProduction=()=>{
   }
   stock(blendId).qty+=qty;
   db.movements.push({id:uid("MOV"),date,type:"FINISHED IN",blendId,resourceId:"",qty,batchCode:code,notes:"Production completed"});
-  db.productionRuns.push({id:uid("RUN"),date,blendId,qty,batchCode:code,notes,completedBy,inputs,remaining:qty,recipeSnapshot:clone(db.recipes[blendId])});
+  const currentCost=blendCost(blendId); db.productionRuns.push({id:uid("RUN"),date,blendId,qty,batchCode:code,notes,completedBy,inputs,remaining:qty,recipeSnapshot:clone(db.recipes[blendId]),costSnapshot:{ingredientCost:currentCost.ingredientCost,packagingCost:currentCost.packagingCost,costPerPouch:currentCost.total,totalBatchCost:currentCost.total*qty}}); logActivity("Production completed",`${code}: ${qty} ${blend(blendId).name}`);
   preparedProduction=null;save();alert(`Production complete. Batch ${code} created.`);render()
 }
 
@@ -266,7 +311,7 @@ window.completeOrder=()=>{
   if(!run)return alert("Choose an available batch.");if(qty<=0||qty>run.remaining)return alert(`Enter a quantity up to ${run.remaining}.`);
   run.remaining-=qty;stock(run.blendId).qty-=qty;
   const order={id:uid("ORD"),date:document.getElementById("oDate").value,customerId:document.getElementById("oCustomer").value,blendId:run.blendId,batchCode:run.batchCode,qty,status:"Complete",notes:document.getElementById("oNotes").value};
-  db.orders.push(order);db.movements.push({id:uid("MOV"),date:order.date,type:"FINISHED OUT",blendId:run.blendId,resourceId:"",qty:-qty,batchCode:run.batchCode,notes:`Order to ${db.customers.find(c=>c.id===order.customerId)?.business||""}`});save();render()
+  db.orders.push(order);logActivity("Order completed",`${db.customers.find(c=>c.id===order.customerId)?.business||""}: ${qty} x ${run.batchCode}`,order.date);db.movements.push({id:uid("MOV"),date:order.date,type:"FINISHED OUT",blendId:run.blendId,resourceId:"",qty:-qty,batchCode:run.batchCode,notes:`Order to ${db.customers.find(c=>c.id===order.customerId)?.business||""}`});save();render()
 }
 
 function deliveriesView(){
@@ -286,7 +331,7 @@ window.addDelivery=()=>{
   const d={id:uid("LOT"),receivedDate:document.getElementById("dDate").value,resourceId,quantity:qty,remaining:qty,cost:Number(document.getElementById("dCost").value),supplier:document.getElementById("dSupplier").value,supplierBatch,bestBefore:document.getElementById("dBBE").value,notes:document.getElementById("dNotes").value};
   db.ingredientBatches.push(d);db.deliveries.push({...d});
   r.supplier=d.supplier||r.supplier;if(d.cost>0)r.costPerUnit=d.cost/qty;recalcResourceQty(resourceId);
-  db.movements.push({id:uid("MOV"),date:d.receivedDate,type:"RESOURCE IN",blendId:"",resourceId,qty,batchCode:"",supplierBatch,notes:`Delivery from ${d.supplier}`});save();render()
+  logActivity("Delivery received",`${r.name}: ${qty} ${r.unit}, lot ${supplierBatch}`,d.receivedDate);db.movements.push({id:uid("MOV"),date:d.receivedDate,type:"RESOURCE IN",blendId:"",resourceId,qty,batchCode:"",supplierBatch,notes:`Delivery from ${d.supplier}`});save();render()
 }
 
 function traceabilityView(){
@@ -319,13 +364,65 @@ function haccpView(){
   <section class="card"><h2>HACCP Log</h2><table><tr><th>Date</th><th>Type</th><th>By</th><th>Result</th><th>Notes</th><th>Action</th></tr>
   ${db.haccp.slice().reverse().map(h=>`<tr><td>${h.date}</td><td>${h.type}</td><td>${esc(h.by)}</td><td>${h.result}</td><td>${esc(h.notes)}</td><td>${esc(h.action)}</td></tr>`).join("")}</table></section>`;
 }
-window.addHaccp=()=>{db.haccp.push({id:uid("HACCP"),date:document.getElementById("hDate").value,type:document.getElementById("hType").value,by:document.getElementById("hBy").value,result:document.getElementById("hResult").value,notes:document.getElementById("hNotes").value,action:document.getElementById("hAction").value,createdAt:new Date().toISOString()});save();render()}
+window.addHaccp=()=>{const rec={id:uid("HACCP"),date:document.getElementById("hDate").value,type:document.getElementById("hType").value,by:document.getElementById("hBy").value,result:document.getElementById("hResult").value,notes:document.getElementById("hNotes").value,action:document.getElementById("hAction").value,createdAt:new Date().toISOString()};db.haccp.push(rec);logActivity("HACCP recorded",`${rec.type}: ${rec.result}`,rec.date);save();render()}
 
 function movementTable(moves){return `<table><tr><th>Date</th><th>Type</th><th>Item</th><th>Qty</th><th>Finished batch</th><th>Supplier batch</th></tr>${moves.map(m=>`<tr><td>${m.date}</td><td>${m.type}</td><td>${m.blendId?blend(m.blendId)?.name:resource(m.resourceId)?.name||""}</td><td>${fmt(m.qty)}</td><td>${esc(m.batchCode)}</td><td>${esc(m.supplierBatch||"")}</td></tr>`).join("")}</table>`}
+
+function costingView(){
+  app.innerHTML=`<section class="card"><h2>Blend Costing</h2>
+  <div class="notice">Costs use the latest cost per gram/item stored against each resource. Enter delivery costs to keep these figures current.</div>
+  <table><tr><th>Blend</th><th>Ingredient cost</th><th>Packaging</th><th>Total cost</th><th>Wholesale profit / margin</th><th>Retail profit / margin</th><th>Market profit / margin</th></tr>
+  ${db.blends.map(b=>{
+    const c=blendCost(b.id);
+    const calc=p=>({profit:Number(p)-c.total,margin:Number(p)>0?((Number(p)-c.total)/Number(p))*100:0});
+    const w=calc(b.wholesale),r=calc(b.retail),m=calc(b.market);
+    return `<tr><td><b>${esc(b.name)}</b></td><td>${money(c.ingredientCost)}</td><td>${money(c.packagingCost)}</td><td><b>${money(c.total)}</b></td>
+    <td>${money(w.profit)} / ${w.margin.toFixed(1)}%</td><td>${money(r.profit)} / ${r.margin.toFixed(1)}%</td><td>${money(m.profit)} / ${m.margin.toFixed(1)}%</td></tr>`;
+  }).join("")}</table></section>
+  ${db.blends.map(b=>{
+    const c=blendCost(b.id);
+    return `<section class="card"><h3>${esc(b.name)}</h3>
+    <div class="grid"><div><h4>Ingredients</h4>${c.ingredients.map(i=>`<div class="metric-row"><span>${esc(resource(i.rid)?.name||i.rid)} · ${fmt(i.qty)}g</span><b>${money(i.cost)}</b></div>`).join("")}</div>
+    <div><h4>Packaging</h4>${c.packaging.map(i=>`<div class="metric-row"><span>${esc(resource(i.rid)?.name||i.rid)}</span><b>${money(i.cost)}</b></div>`).join("")}</div></div>
+    <div class="metric-row"><span>Cost per pouch</span><b>${money(c.total)}</b></div>
+    <div class="metric-row"><span>Cost per kg</span><b>${money((c.total/((Object.values(db.recipes[b.id]||{}).reduce((a,x)=>a+Number(x),0)||1)))*1000)}</b></div>
+    </section>`;
+  }).join("")}`;
+}
+
+function reportsView(){
+  const lowRes=db.resources.filter(r=>Number(r.reorder||0)>0&&Number(r.qty||0)<=Number(r.reorder||0));
+  app.innerHTML=`<section class="card no-print"><h2>Reports</h2><div class="actions"><button onclick="window.print()">Print current report</button></div></section>
+  <section class="card"><h2>${esc(db.settings?.businessName||"Craic Larder")} — Stock Valuation</h2>
+  <div class="metric-row"><span>Ingredients</span><b>${money(resourceValue("Ingredient"))}</b></div>
+  <div class="metric-row"><span>Packaging</span><b>${money(resourceValue("Packaging"))}</b></div>
+  <div class="metric-row"><span>Finished stock at production cost</span><b>${money(finishedStockCostValue())}</b></div>
+  <div class="metric-row"><span>Finished stock at retail value</span><b>${money(finishedStockRetailValue())}</b></div></section>
+  <section class="card"><h2>Low Stock</h2>${lowRes.length?`<table><tr><th>Resource</th><th>Available</th><th>Reorder level</th></tr>${lowRes.map(r=>`<tr><td>${esc(r.name)}</td><td>${fmt(r.qty)} ${r.unit}</td><td>${fmt(r.reorder)} ${r.unit}</td></tr>`).join("")}</table>`:"<p>No resources are below their reorder levels.</p>"}</section>
+  <section class="card"><h2>Production History</h2><table><tr><th>Date</th><th>Batch</th><th>Blend</th><th>Qty</th><th>Batch cost</th><th>Cost/pouch</th></tr>
+  ${db.productionRuns.slice().reverse().map(r=>`<tr><td>${r.date}</td><td>${r.batchCode}</td><td>${blend(r.blendId)?.name||""}</td><td>${r.qty}</td><td>${money(r.costSnapshot?.totalBatchCost||0)}</td><td>${money(r.costSnapshot?.costPerPouch||blendCost(r.blendId).total)}</td></tr>`).join("")}</table></section>
+  <section class="card"><h2>HACCP Records</h2><table><tr><th>Date</th><th>Type</th><th>By</th><th>Result</th><th>Notes</th></tr>${db.haccp.slice().reverse().map(h=>`<tr><td>${h.date}</td><td>${h.type}</td><td>${esc(h.by)}</td><td>${h.result}</td><td>${esc(h.notes)}</td></tr>`).join("")}</table></section>`;
+}
+
+function settingsView(){
+  const s=db.settings||{};
+  app.innerHTML=`<section class="card"><h2>Settings</h2>
+  <label>Business name</label><input id="setBusiness" value="${esc(s.businessName||"Craic Larder")}">
+  <label>Business address</label><textarea id="setAddress">${esc(s.address||"")}</textarea>
+  <label>EHO registration / reference</label><input id="setEho" value="${esc(s.ehoNumber||"")}">
+  <label>Default operator</label><input id="setOperator" value="${esc(s.defaultOperator||"James")}">
+  <label>Optional labour cost per production batch</label><input type="number" step="0.01" id="setLabour" value="${Number(s.labourPerBatch||0)}">
+  <div class="actions"><button onclick="saveSettings()">Save settings</button></div></section>
+  <section class="card"><h2>Blend selling prices</h2><table><tr><th>Blend</th><th>Wholesale</th><th>Retail</th><th>Market</th><th></th></tr>
+  ${db.blends.map(b=>`<tr><td>${esc(b.name)}</td><td><input type="number" step="0.01" id="wh-${b.id}" value="${b.wholesale}"></td><td><input type="number" step="0.01" id="rt-${b.id}" value="${b.retail}"></td><td><input type="number" step="0.01" id="mk-${b.id}" value="${b.market}"></td><td><button onclick="saveBlendPrice('${b.id}')">Save</button></td></tr>`).join("")}</table></section>`;
+}
+window.saveSettings=()=>{db.settings={businessName:document.getElementById("setBusiness").value,address:document.getElementById("setAddress").value,ehoNumber:document.getElementById("setEho").value,defaultOperator:document.getElementById("setOperator").value,labourPerBatch:Number(document.getElementById("setLabour").value)};save();logActivity("Settings updated","Business settings changed");render()}
+window.saveBlendPrice=id=>{const b=blend(id);b.wholesale=Number(document.getElementById("wh-"+id).value);b.retail=Number(document.getElementById("rt-"+id).value);b.market=Number(document.getElementById("mk-"+id).value);save();logActivity("Selling prices updated",b.name);render()}
+
 function backupView(){
   app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
   <div class="actions"><button onclick="exportBackup()">Export full backup</button><button class="secondary" onclick="document.getElementById('importFile').click()">Import backup</button><input hidden id="importFile" type="file" accept=".json" onchange="importBackup(event)"><button class="danger" onclick="resetApp()">Reset all data</button></div>
-  <p>${db.productionRuns.length} batches · ${db.ingredientBatches.length} supplier lots · ${db.orders.length} orders · ${db.haccp.length} HACCP records</p></section>`;
+  <p>${db.productionRuns.length} batches · ${db.ingredientBatches.length} supplier lots · ${db.orders.length} orders · ${db.haccp.length} HACCP records · ${(db.activity||[]).length} activity entries</p></section>`;
 }
 window.exportBackup=()=>{const blob=new Blob([JSON.stringify(db,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`craic-hq-backup-${today()}.json`;a.click();URL.revokeObjectURL(a.href)}
 window.importBackup=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{db=JSON.parse(r.result);save();render();alert("Backup imported.")}catch{alert("Invalid backup file.")}};r.readAsText(f)}

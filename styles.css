@@ -39,3 +39,15 @@ pre{white-space:pre-wrap}
 .batch-choice{padding:10px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#fff}
 .small{font-size:.8rem}
 @media(max-width:700px){.recipe-line,.batch-line{grid-template-columns:1fr}}
+
+.summary-box{padding:12px;border:1px solid var(--line);border-radius:10px;background:#fff;margin:8px 0}
+.metric-row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--line)}
+.metric-row:last-child{border-bottom:0}
+.print-only{display:none}
+@media print{
+  header,nav,.no-print,button{display:none!important}
+  body{background:white}
+  main{max-width:none;padding:0}
+  .card{box-shadow:none;border:1px solid #bbb;break-inside:avoid}
+  .print-only{display:block}
+}
