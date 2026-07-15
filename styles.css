@@ -51,3 +51,8 @@ pre{white-space:pre-wrap}
   .card{box-shadow:none;border:1px solid #bbb;break-inside:avoid}
   .print-only{display:block}
 }
+
+.manager-actions{display:flex;gap:6px;flex-wrap:wrap}
+.archived{opacity:.55}
+.search-box{margin-bottom:12px}
+.plan-card{border-left:5px solid #111}

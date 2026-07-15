@@ -61,7 +61,8 @@ function loadAndMigrate(){
   const out=loaded||clone(seed);
   for(const [k,v] of Object.entries(seed)) if(out[k]===undefined) out[k]=clone(v);
   if(!Array.isArray(out.ingredientBatches)) out.ingredientBatches=[];
-  out.resources=out.resources.map(r=>({...r,batch:undefined}));
+  out.resources=out.resources.map(r=>({...r,batch:undefined,active:r.active!==false}));
+  out.blends=out.blends.map(b=>({...b,active:b.active!==false}));
   localStorage.setItem(DB_KEY,JSON.stringify(out));
   return out;
 }
@@ -71,6 +72,8 @@ function today(){return new Date().toISOString().slice(0,10)}
 function blend(id){return db.blends.find(x=>x.id===id)}
 function stock(id){return db.stock.find(x=>x.blendId===id)}
 function resource(id){return db.resources.find(x=>x.id===id)}
+function activeResources(){return db.resources.filter(r=>r.active!==false)}
+function activeBlends(){return db.blends.filter(b=>b.active!==false)}
 function lot(id){return db.ingredientBatches.find(x=>x.id===id)}
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[m]))}
 function options(items,valueKey,labelKey,selected=""){return items.map(x=>`<option value="${esc(x[valueKey])}" ${String(x[valueKey])===String(selected)?"selected":""}>${esc(x[labelKey])}</option>`).join("")}
@@ -118,7 +121,7 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>nav(b.dataset.v
 document.getElementById("menuBtn").onclick=()=>document.getElementById("nav").scrollIntoView({behavior:"smooth"});
 
 function render(){
-  const map={dashboard,stock:stockView,resources:resourcesView,recipes:recipesView,production:productionView,orders:ordersView,customers:customersView,deliveries:deliveriesView,costing:costingView,reports:reportsView,traceability:traceabilityView,haccp:haccpView,settings:settingsView,backup:backupView};
+  const map={dashboard,stock:stockView,planner:plannerView,resources:resourcesView,blends:blendsView,recipes:recipesView,production:productionView,orders:ordersView,customers:customersView,deliveries:deliveriesView,costing:costingView,reports:reportsView,traceability:traceabilityView,haccp:haccpView,settings:settingsView,backup:backupView};
   (map[currentView]||dashboard)();
 }
 function dashboard(){
@@ -150,8 +153,11 @@ function dashboard(){
   </section></div>
   <section class="card"><h2>Recent activity</h2>${recent.length?`<table><tr><th>Date</th><th>Time</th><th>Action</th><th>Details</th></tr>${recent.map(a=>`<tr><td>${a.date}</td><td>${a.time}</td><td>${esc(a.type)}</td><td>${esc(a.details)}</td></tr>`).join("")}</table>`:"<p>No activity recorded yet.</p>"}</section>`;
 }
+function plannerView(){const plans=activeBlends().map(b=>{const rec=db.recipes[b.id]||{};let max=Infinity,limiting="";for(const [rid,per] of Object.entries(rec)){if(Number(per)<=0)continue;const possible=Math.floor(Number(resource(rid)?.qty||0)/Number(per));if(possible<max){max=possible;limiting=resource(rid)?.name||rid}}for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){const possible=Math.floor(Number(resource(rid)?.qty||0));if(possible<max){max=possible;limiting=resource(rid)?.name||rid}}if(max===Infinity)max=0;return {b,max,limiting}});app.innerHTML=`<section class="card"><h2>Production Planner</h2><div class="notice">Maximum pouches available from current stock.</div><div class="grid">${plans.map(p=>`<section class="card plan-card"><h3>${esc(p.b.name)}</h3><div class="kpi">${p.max}</div><div class="muted">pouches possible</div><p><b>Limiting item:</b> ${esc(p.limiting||"Recipe incomplete")}</p></section>`).join("")}</div></section><section class="card"><h2>Plan a Batch & Shopping List</h2><div class="row"><div><label>Blend</label><select id="planBlend">${options(activeBlends(),"id","name")}</select></div><div><label>Pouches planned</label><input type="number" id="planQty" value="40" min="1"></div></div><button onclick="calculateShopping()">Calculate shortages</button><div id="shoppingResult"></div></section>`}
+window.calculateShopping=()=>{const blendId=document.getElementById("planBlend").value,qty=Number(document.getElementById("planQty").value),rec=db.recipes[blendId]||{},rows=[];for(const [rid,per] of Object.entries(rec)){const need=Number(per)*qty,have=Number(resource(rid)?.qty||0);rows.push({name:resource(rid)?.name||rid,need,have,short:Math.max(0,need-have),unit:resource(rid)?.unit||"g"})}for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){const need=qty,have=Number(resource(rid)?.qty||0);rows.push({name:resource(rid)?.name||rid,need,have,short:Math.max(0,need-have),unit:resource(rid)?.unit||"item"})}document.getElementById("shoppingResult").innerHTML=`<h3>Requirements for ${qty} ${blend(blendId).name}</h3><table><tr><th>Resource</th><th>Need</th><th>Have</th><th>Order</th></tr>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${fmt(r.need)} ${r.unit}</td><td>${fmt(r.have)} ${r.unit}</td><td><b>${r.short>0?fmt(r.short)+" "+r.unit:"Enough"}</b></td></tr>`).join("")}</table>`}
+
 function stockView(){
-  app.innerHTML=`<section class="card"><h2>Finished Stock</h2>
+  app.innerHTML=`<section class="card"><h2>Add Opening Finished Stock</h2><div class="row"><div><label>Blend</label><select id="openBlend">${options(activeBlends(),"id","name")}</select></div><div><label>Quantity</label><input type="number" id="openQty" min="1"></div><div><label>Opening batch code</label><input id="openBatch" placeholder="e.g. GH-OPEN-160726"></div></div><button onclick="addOpeningFinished()">Add opening finished stock</button></section><section class="card"><h2>Finished Stock</h2>
   <table><tr><th>Blend</th><th>Total</th><th>Low level</th><th>Status</th></tr>
   ${db.stock.map(s=>`<tr><td>${blend(s.blendId).name}</td><td>${s.qty}</td>
   <td><input type="number" id="low-${s.blendId}" value="${s.low}"></td>
@@ -160,20 +166,17 @@ function stockView(){
   ${db.productionRuns.slice().reverse().map(r=>`<tr><td><b>${r.batchCode}</b></td><td>${blend(r.blendId).name}</td><td>${r.date}</td><td>${r.qty}</td><td>${r.remaining}</td></tr>`).join("")}</table></section>`;
 }
 window.saveLow=id=>{stock(id).low=Number(document.getElementById("low-"+id).value);save();render()}
+window.addOpeningFinished=()=>{const blendId=document.getElementById("openBlend").value,qty=Number(document.getElementById("openQty").value),code=document.getElementById("openBatch").value.trim();if(qty<=0||!code)return alert("Enter quantity and an opening batch code.");stock(blendId).qty+=qty;db.productionRuns.push({id:uid("RUN"),date:today(),blendId,qty,batchCode:code,notes:"Opening finished stock",completedBy:"Opening Balance",inputs:[],remaining:qty,recipeSnapshot:clone(db.recipes[blendId]||{}),opening:true});db.movements.push({id:uid("MOV"),date:today(),type:"OPENING FINISHED IN",blendId,resourceId:"",qty,batchCode:code,notes:"Opening finished stock"});logActivity("Opening finished stock",`${code}: ${qty} ${blend(blendId).name}`);save();render()}
 
-function resourcesView(){
-  app.innerHTML=`<section class="card"><h2>Ingredients & Packaging</h2>
-  <div class="notice">Stock totals are calculated from delivery lots. Record new stock through Deliveries so supplier batch codes remain traceable.</div>
-  <table><tr><th>Resource</th><th>Type</th><th>Available</th><th>Unit</th><th>Supplier</th><th>Cost/unit</th><th>Reorder at</th><th></th></tr>
-  ${db.resources.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.type}</td><td>${fmt(r.qty)}</td><td>${r.unit}</td>
-  <td><input id="rs-${r.id}" value="${esc(r.supplier||"")}"></td>
-  <td><input type="number" step="0.00001" id="rc-${r.id}" value="${r.costPerUnit||0}"></td>
-  <td><input type="number" step="0.01" id="rr-${r.id}" value="${r.reorder||0}" title="Reorder level"></td>
-  <td><button onclick="saveResource('${r.id}')">Save</button></td></tr>`).join("")}</table></section>
-  <section class="card"><h2>Open Supplier Lots</h2><table><tr><th>Resource</th><th>Supplier batch</th><th>Received</th><th>Remaining</th><th>Supplier</th></tr>
-  ${db.ingredientBatches.filter(b=>b.remaining>0).map(b=>`<tr><td>${resource(b.resourceId)?.name||""}</td><td><b>${esc(b.supplierBatch)}</b></td><td>${b.receivedDate}</td><td>${fmt(b.remaining)} ${resource(b.resourceId)?.unit||""}</td><td>${esc(b.supplier)}</td></tr>`).join("")}</table></section>`;
-}
-window.saveResource=id=>{const r=resource(id);r.supplier=document.getElementById("rs-"+id).value;r.costPerUnit=Number(document.getElementById("rc-"+id).value);r.reorder=Number(document.getElementById("rr-"+id).value);save();logActivity("Resource updated",r.name);render()}
+function resourcesView(){app.innerHTML=`<section class="card"><h2>Add Ingredient or Packaging</h2><div class="row"><div><label>Name</label><input id="newResName"></div><div><label>Type</label><select id="newResType"><option>Ingredient</option><option>Packaging</option></select></div><div><label>Unit</label><select id="newResUnit"><option>g</option><option>kg</option><option>item</option><option>ml</option><option>litre</option><option>roll</option><option>box</option></select></div><div><label>Reorder level</label><input type="number" step="0.01" id="newResReorder" value="0"></div></div><div class="row"><div><label>Default supplier</label><input id="newResSupplier"></div><div><label>Cost per unit</label><input type="number" step="0.00001" id="newResCost" value="0"></div></div><button onclick="addResource()">Add resource</button></section><section class="card"><h2>Ingredients & Packaging</h2><input class="search-box" id="resSearch" placeholder="Search resources" oninput="renderResourceTable()"><div class="notice">Use Deliveries or Opening Balance to add physical stock.</div><div id="resourceTable"></div></section>`;renderResourceTable()}
+window.renderResourceTable=()=>{const q=(document.getElementById("resSearch")?.value||"").toLowerCase(),rows=db.resources.filter(r=>r.name.toLowerCase().includes(q)||r.type.toLowerCase().includes(q));document.getElementById("resourceTable").innerHTML=`<table><tr><th>Resource</th><th>Type</th><th>Available</th><th>Unit</th><th>Supplier</th><th>Cost/unit</th><th>Reorder</th><th>Actions</th></tr>${rows.map(r=>`<tr class="${r.active===false?'archived':''}"><td><input id="rn-${r.id}" value="${esc(r.name)}"></td><td><select id="rtp-${r.id}"><option ${r.type==="Ingredient"?"selected":""}>Ingredient</option><option ${r.type==="Packaging"?"selected":""}>Packaging</option></select></td><td>${fmt(r.qty)}</td><td><input id="ru-${r.id}" value="${esc(r.unit)}"></td><td><input id="rs-${r.id}" value="${esc(r.supplier||"")}"></td><td><input type="number" step="0.00001" id="rc-${r.id}" value="${r.costPerUnit||0}"></td><td><input type="number" step="0.01" id="rr-${r.id}" value="${r.reorder||0}"></td><td><div class="manager-actions"><button onclick="saveResource('${r.id}')">Save</button><button class="secondary" onclick="toggleResource('${r.id}')">${r.active===false?'Restore':'Archive'}</button></div></td></tr>`).join("")}</table>`}
+window.addResource=()=>{const name=document.getElementById("newResName").value.trim();if(!name)return alert("Enter a resource name.");const id="RES-"+Date.now().toString(36);db.resources.push({id,name,type:document.getElementById("newResType").value,unit:document.getElementById("newResUnit").value,qty:0,supplier:document.getElementById("newResSupplier").value,costPerUnit:Number(document.getElementById("newResCost").value),reorder:Number(document.getElementById("newResReorder").value),active:true});logActivity("Resource added",name);save();render()}
+window.saveResource=id=>{const r=resource(id);r.name=document.getElementById("rn-"+id).value.trim()||r.name;r.type=document.getElementById("rtp-"+id).value;r.unit=document.getElementById("ru-"+id).value.trim()||r.unit;r.supplier=document.getElementById("rs-"+id).value;r.costPerUnit=Number(document.getElementById("rc-"+id).value);r.reorder=Number(document.getElementById("rr-"+id).value);save();logActivity("Resource updated",r.name);render()}
+window.toggleResource=id=>{const r=resource(id);r.active=r.active===false;save();logActivity(r.active?"Resource restored":"Resource archived",r.name);render()}
+function blendsView(){app.innerHTML=`<section class="card"><h2>Add Blend</h2><div class="row"><div><label>Blend name</label><input id="newBlendName"></div><div><label>Short code</label><input id="newBlendCode" maxlength="6" placeholder="e.g. GH"></div><div><label>Wholesale</label><input type="number" step="0.01" id="newBlendWholesale" value="2.50"></div><div><label>Retail</label><input type="number" step="0.01" id="newBlendRetail" value="4.49"></div><div><label>Market</label><input type="number" step="0.01" id="newBlendMarket" value="4.50"></div></div><button onclick="addBlend()">Add blend</button></section><section class="card"><h2>Manage Blends</h2><table><tr><th>Name</th><th>Code</th><th>Wholesale</th><th>Retail</th><th>Market</th><th>Actions</th></tr>${db.blends.map(b=>`<tr class="${b.active===false?'archived':''}"><td><input id="bn-${b.id}" value="${esc(b.name)}"></td><td><b>${esc(b.id)}</b></td><td><input type="number" step="0.01" id="bw-${b.id}" value="${b.wholesale}"></td><td><input type="number" step="0.01" id="br-${b.id}" value="${b.retail}"></td><td><input type="number" step="0.01" id="bm-${b.id}" value="${b.market}"></td><td><div class="manager-actions"><button onclick="saveBlend('${b.id}')">Save</button><button class="secondary" onclick="toggleBlend('${b.id}')">${b.active===false?'Restore':'Archive'}</button></div></td></tr>`).join("")}</table></section>`}
+window.addBlend=()=>{const name=document.getElementById("newBlendName").value.trim(),code=document.getElementById("newBlendCode").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"");if(!name||!code)return alert("Enter a blend name and short code.");if(db.blends.some(b=>b.id===code))return alert("That blend code already exists.");db.blends.push({id:code,name,wholesale:Number(document.getElementById("newBlendWholesale").value),retail:Number(document.getElementById("newBlendRetail").value),market:Number(document.getElementById("newBlendMarket").value),active:true});db.stock.push({blendId:code,qty:0,low:10});db.recipes[code]={};logActivity("Blend added",name);save();render()}
+window.saveBlend=id=>{const b=blend(id);b.name=document.getElementById("bn-"+id).value.trim()||b.name;b.wholesale=Number(document.getElementById("bw-"+id).value);b.retail=Number(document.getElementById("br-"+id).value);b.market=Number(document.getElementById("bm-"+id).value);save();logActivity("Blend updated",b.name);render()}
+window.toggleBlend=id=>{const b=blend(id);b.active=b.active===false;save();logActivity(b.active?"Blend restored":"Blend archived",b.name);render()}
 
 function recipesView(){
   const selected=document.getElementById("recipeBlend")?.value||db.blends[0].id;
@@ -190,7 +193,7 @@ function recipesView(){
   </section>`;
 }
 function recipeLine(i,rid="",qty=""){return `<div class="recipe-line" data-i="${i}">
-  <div><label>Ingredient</label><select class="recipe-resource">${options(db.resources.filter(r=>r.type==="Ingredient"),"id","name",rid)}</select></div>
+  <div><label>Ingredient</label><select class="recipe-resource">${options(activeResources().filter(r=>r.type==="Ingredient"),"id","name",rid)}</select></div>
   <div><label>Qty per pouch</label><input class="recipe-qty" type="number" step="0.01" value="${qty}"></div>
   <div><label>Unit</label><input value="g" disabled></div>
   <button class="danger" onclick="this.parentElement.remove();updateRecipeTotal()">Remove</button>
@@ -210,7 +213,7 @@ window.saveRecipe=()=>{
 function productionView(){
   app.innerHTML=`<section class="card"><h2>Record Production Run</h2>
   <div class="row"><div><label>Date</label><input type="date" id="prDate" value="${today()}"></div>
-  <div><label>Blend</label><select id="prBlend">${options(db.blends,"id","name")}</select></div>
+  <div><label>Blend</label><select id="prBlend">${options(activeBlends(),"id","name")}</select></div>
   <div><label>Pouches made</label><input type="number" id="prQty" min="1" value="10"></div>
   <div><label>Completed by</label><input id="prBy" value="${esc(db.settings?.defaultOperator||"James")}"></div></div>
   <label>Notes</label><textarea id="prNotes"></textarea>
@@ -317,22 +320,17 @@ window.completeOrder=()=>{
 function deliveriesView(){
   app.innerHTML=`<section class="card"><h2>Record Delivery / Supplier Lot</h2>
   <div class="row"><div><label>Date received</label><input id="dDate" type="date" value="${today()}"></div>
-  <div><label>Resource</label><select id="dRes">${options(db.resources,"id","name")}</select></div>
+  <div><label>Resource</label><select id="dRes">${options(activeResources(),"id","name")}</select></div>
   <div><label>Quantity</label><input id="dQty" type="number" step="0.01"></div><div><label>Cost paid</label><input id="dCost" type="number" step="0.01"></div></div>
   <div class="row"><div><label>Supplier</label><input id="dSupplier"></div><div><label>Supplier batch code</label><input id="dBatch"></div>
   <div><label>Best before</label><input id="dBBE" type="date"></div></div>
-  <label>Notes</label><textarea id="dNotes"></textarea><button onclick="addDelivery()">Save delivery lot</button></section>
+  <label>Notes</label><textarea id="dNotes"></textarea><div class="actions"><button onclick="addDelivery()">Save delivery lot</button><button class="secondary" onclick="addOpeningBalance()">Save as opening balance</button></div></section>
   <section class="card"><h2>Delivery History</h2><table><tr><th>Date</th><th>Resource</th><th>Supplier batch</th><th>Received</th><th>Remaining</th><th>Supplier</th></tr>
   ${db.ingredientBatches.slice().reverse().map(d=>`<tr><td>${d.receivedDate}</td><td>${resource(d.resourceId)?.name||""}</td><td><b>${esc(d.supplierBatch)}</b></td><td>${fmt(d.quantity)}</td><td>${fmt(d.remaining)}</td><td>${esc(d.supplier)}</td></tr>`).join("")}</table></section>`;
 }
-window.addDelivery=()=>{
-  const resourceId=document.getElementById("dRes").value,r=resource(resourceId),qty=Number(document.getElementById("dQty").value),supplierBatch=document.getElementById("dBatch").value.trim();
-  if(qty<=0)return alert("Enter a valid quantity.");if(!supplierBatch)return alert("Supplier batch code is required for traceability.");
-  const d={id:uid("LOT"),receivedDate:document.getElementById("dDate").value,resourceId,quantity:qty,remaining:qty,cost:Number(document.getElementById("dCost").value),supplier:document.getElementById("dSupplier").value,supplierBatch,bestBefore:document.getElementById("dBBE").value,notes:document.getElementById("dNotes").value};
-  db.ingredientBatches.push(d);db.deliveries.push({...d});
-  r.supplier=d.supplier||r.supplier;if(d.cost>0)r.costPerUnit=d.cost/qty;recalcResourceQty(resourceId);
-  logActivity("Delivery received",`${r.name}: ${qty} ${r.unit}, lot ${supplierBatch}`,d.receivedDate);db.movements.push({id:uid("MOV"),date:d.receivedDate,type:"RESOURCE IN",blendId:"",resourceId,qty,batchCode:"",supplierBatch,notes:`Delivery from ${d.supplier}`});save();render()
-}
+function saveLot(mode){const resourceId=document.getElementById("dRes").value,r=resource(resourceId),qty=Number(document.getElementById("dQty").value);let supplierBatch=document.getElementById("dBatch").value.trim();if(qty<=0)return alert("Enter a valid quantity.");if(!supplierBatch)supplierBatch=mode==="Opening Balance"?"UNKNOWN-OPENING":"";if(!supplierBatch)return alert("Supplier batch code is required for traceability.");const d={id:uid("LOT"),receivedDate:document.getElementById("dDate").value,resourceId,quantity:qty,remaining:qty,cost:Number(document.getElementById("dCost").value),supplier:document.getElementById("dSupplier").value,supplierBatch,bestBefore:document.getElementById("dBBE").value,notes:document.getElementById("dNotes").value,entryType:mode};db.ingredientBatches.push(d);db.deliveries.push({...d});r.supplier=d.supplier||r.supplier;if(d.cost>0)r.costPerUnit=d.cost/qty;recalcResourceQty(resourceId);logActivity(mode,`${r.name}: ${qty} ${r.unit}, lot ${supplierBatch}`,d.receivedDate);db.movements.push({id:uid("MOV"),date:d.receivedDate,type:mode==="Opening Balance"?"OPENING RESOURCE IN":"RESOURCE IN",blendId:"",resourceId,qty,batchCode:"",supplierBatch,notes:mode==="Opening Balance"?"Opening balance":`Delivery from ${d.supplier}`});save();render()}
+window.addDelivery=()=>saveLot("Delivery received")
+window.addOpeningBalance=()=>saveLot("Opening Balance")
 
 function traceabilityView(){
   app.innerHTML=`<section class="card"><h2>Traceability Search</h2><label>Finished batch, supplier batch, blend or customer</label>
