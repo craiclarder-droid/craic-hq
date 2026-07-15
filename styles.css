@@ -34,3 +34,8 @@ pre{white-space:pre-wrap}
   nav{top:57px}
   table{font-size:.8rem}
 }
+
+.recipe-line,.batch-line{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end;margin:8px 0}
+.batch-choice{padding:10px;border:1px solid var(--line);border-radius:8px;margin:8px 0;background:#fff}
+.small{font-size:.8rem}
+@media(max-width:700px){.recipe-line,.batch-line{grid-template-columns:1fr}}
