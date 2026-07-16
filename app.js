@@ -357,28 +357,87 @@ function renderProductionDraft(draft){
   if(!item)return "";
   const rec=db.recipes[item.blendId]||{};
   const qty=Number(draft.actualQty||item.plannedQty);
+  draft.lotAllocations=draft.lotAllocations||{};
   const requirements=Object.entries(rec).map(([rid,per])=>({resourceId:rid,required:Number(per)*qty,lots:availableLots(rid)}));
   return `<section class="card"><h2>Complete ${esc(blend(item.blendId)?.name||item.blendId)}</h2>
   <div class="row"><div><label>Production date</label><input type="date" id="qdDate" value="${esc(draft.date||today())}"></div>
   <div><label>Planned pouches</label><input value="${item.plannedQty}" disabled></div>
-  <div><label>Actual pouches made</label><input type="number" min="1" id="qdActual" value="${qty}" onchange="updateProductionDraft()"></div>
+  <div><label>Actual pouches made</label><input type="number" min="1" id="qdActual" value="${qty}" onchange="updateProductionDraft(true)"></div>
   <div><label>Operator</label><input id="qdBy" value="${esc(draft.completedBy||"")}" onchange="updateProductionDraft()"></div></div>
   <div class="row"><div><label>Wastage / lost pouches</label><input type="number" min="0" id="qdWaste" value="${Number(draft.wastage||0)}" onchange="updateProductionDraft()"></div>
   <div><label>Wastage reason</label><input id="qdWasteReason" value="${esc(draft.wastageReason||"")}" onchange="updateProductionDraft()"></div></div>
   <label>Production notes</label><textarea id="qdNotes" onchange="updateProductionDraft()">${esc(draft.notes||"")}</textarea>
   <h3>Exact Supplier Lots</h3>
-  <div class="notice">Select the precise supplier lot used for each ingredient. The requirement automatically follows the actual yield above.</div>
-  ${requirements.map((req,i)=>{
-    const r=resource(req.resourceId),selected=draft.selectedLots?.[req.resourceId]||"";
-    return `<div class="batch-choice"><b>${esc(r?.name||req.resourceId)}</b> — need ${fmt(req.required)} ${esc(r?.unit||"")}
-    <label>Supplier lot</label><select id="qLot-${req.resourceId}" onchange="updateProductionDraft()"><option value="">Choose lot</option>
-    ${req.lots.map(l=>`<option value="${l.id}" ${l.id===selected?"selected":""}>${esc(l.supplierBatch)} · ${fmt(l.remaining)} ${esc(r?.unit||"")} left · ${esc(l.supplier)}</option>`).join("")}</select></div>`;
-  }).join("")}
+  <div class="notice">Lots are allocated oldest-first automatically. You can adjust the amounts, but every ingredient must be fully covered before the batch can be completed.</div>
+  ${requirements.map(req=>renderLotAllocation(req,draft)).join("")}
   <h3>Packaging</h3><p>${qty} pouches, front labels, back labels and desiccants will be deducted FIFO.</p>
   <h3>HACCP link</h3><p>${haccpForDate(draft.date||today()).length} HACCP records currently match this production date. They will be linked automatically.</p>
   <div class="actions"><button onclick="completeQueueBatch()">Complete Batch & Generate Code</button><button class="secondary" onclick="cancelProductionDraft()">Pause and return later</button></div></section>`;
 }
-window.updateProductionDraft=()=>{
+function autoAllocateLots(resourceId,required){
+  let left=Number(required),allocations=[];
+  for(const l of availableLots(resourceId)){
+    if(left<=0)break;
+    const amount=Math.min(Number(l.remaining),left);
+    if(amount>0)allocations.push({lotId:l.id,amount});
+    left-=amount;
+  }
+  return allocations;
+}
+function renderLotAllocation(req,draft){
+  const r=resource(req.resourceId);
+  let allocations=draft.lotAllocations?.[req.resourceId];
+  if(!Array.isArray(allocations)||!allocations.length){
+    allocations=autoAllocateLots(req.resourceId,req.required);
+    draft.lotAllocations[req.resourceId]=allocations;
+    save();
+  }
+  const allocated=allocations.reduce((a,x)=>a+Number(x.amount||0),0);
+  const short=Math.max(0,req.required-allocated);
+  const statusClass=short>0?"bad":"good";
+  const statusText=short>0?`SHORT ${fmt(short)} ${r?.unit||""}`:"FULLY ALLOCATED";
+  return `<div class="batch-choice">
+    <div><b>${esc(r?.name||req.resourceId)}</b> — need ${fmt(req.required)} ${esc(r?.unit||"")}</div>
+    <div class="badge ${statusClass}">${statusText}</div>
+    ${allocations.map((a,i)=>{
+      const l=lot(a.lotId);
+      return `<div class="batch-line">
+        <div><label>Supplier lot</label><select id="qaLot-${req.resourceId}-${i}" onchange="updateAllocation('${req.resourceId}',${i})">
+          ${availableLots(req.resourceId).map(opt=>`<option value="${opt.id}" ${opt.id===a.lotId?"selected":""}>${esc(opt.supplierBatch)} · ${fmt(opt.remaining)} ${esc(r?.unit||"")} left · ${esc(opt.supplier)}</option>`).join("")}
+        </select></div>
+        <div><label>Amount used</label><input type="number" step="0.01" min="0" id="qaAmt-${req.resourceId}-${i}" value="${Number(a.amount||0)}" onchange="updateAllocation('${req.resourceId}',${i})"></div>
+        <div><label>Available</label><input value="${fmt(l?.remaining||0)} ${esc(r?.unit||"")}" disabled></div>
+        <button class="danger" onclick="removeAllocation('${req.resourceId}',${i})">Remove</button>
+      </div>`;
+    }).join("")}
+    <div class="actions"><button class="secondary" onclick="addAllocation('${req.resourceId}')">Add another lot</button></div>
+  </div>`;
+}
+window.addAllocation=(resourceId)=>{
+  const d=db.productionDraft;if(!d)return;
+  d.lotAllocations=d.lotAllocations||{};
+  d.lotAllocations[resourceId]=d.lotAllocations[resourceId]||[];
+  const used=new Set(d.lotAllocations[resourceId].map(x=>x.lotId));
+  const next=availableLots(resourceId).find(l=>!used.has(l.id));
+  if(!next)return alert("No more supplier lots are available for this ingredient.");
+  d.lotAllocations[resourceId].push({lotId:next.id,amount:0});
+  save();render();
+}
+window.removeAllocation=(resourceId,index)=>{
+  const d=db.productionDraft;if(!d)return;
+  d.lotAllocations?.[resourceId]?.splice(index,1);
+  save();render();
+}
+window.updateAllocation=(resourceId,index)=>{
+  const d=db.productionDraft;if(!d)return;
+  const lotEl=document.getElementById(`qaLot-${resourceId}-${index}`);
+  const amtEl=document.getElementById(`qaAmt-${resourceId}-${index}`);
+  d.lotAllocations=d.lotAllocations||{};
+  d.lotAllocations[resourceId]=d.lotAllocations[resourceId]||[];
+  d.lotAllocations[resourceId][index]={lotId:lotEl.value,amount:Number(amtEl.value||0)};
+  save();render();
+}
+window.updateProductionDraft=(rebuildAllocations=false)=>{
   const d=db.productionDraft;if(!d)return;
   d.date=document.getElementById("qdDate")?.value||d.date;
   d.actualQty=Number(document.getElementById("qdActual")?.value||d.actualQty);
@@ -386,17 +445,21 @@ window.updateProductionDraft=()=>{
   d.notes=document.getElementById("qdNotes")?.value||"";
   d.wastage=Number(document.getElementById("qdWaste")?.value||0);
   d.wastageReason=document.getElementById("qdWasteReason")?.value||"";
-  d.selectedLots=d.selectedLots||{};
-  document.querySelectorAll('[id^="qLot-"]').forEach(el=>d.selectedLots[el.id.replace("qLot-","")]=el.value);
-  save();
-  render();
+  if(rebuildAllocations)d.lotAllocations={};
+  save();render();
 }
 window.cancelProductionDraft=()=>{save();nav("planner")}
-function consumeLot(lotId,amount,finishedCode,date,resourceId){
-  const l=lot(lotId);if(!l||Number(l.remaining)<amount)return false;
-  l.remaining=Number(l.remaining)-amount;
-  db.movements.push({id:uid("MOV"),date,type:"RESOURCE OUT",blendId:"",resourceId,qty:-amount,batchCode:finishedCode,supplierBatch:l.supplierBatch,notes:`Used supplier lot ${l.supplierBatch} in ${finishedCode}`});
-  recalcResourceQty(resourceId);return true;
+function consumeExactAllocations(resourceId,allocations,finishedCode,date){
+  const uses=[];
+  for(const a of allocations){
+    const l=lot(a.lotId),amount=Number(a.amount||0);
+    if(!l||amount<=0||Number(l.remaining)<amount)return {ok:false};
+    l.remaining=Number(l.remaining)-amount;
+    uses.push({lotId:l.id,supplierBatch:l.supplierBatch,qty:amount});
+    db.movements.push({id:uid("MOV"),date,type:"RESOURCE OUT",blendId:"",resourceId,qty:-amount,batchCode:finishedCode,supplierBatch:l.supplierBatch,notes:`Used supplier lot ${l.supplierBatch} in ${finishedCode}`});
+  }
+  recalcResourceQty(resourceId);
+  return {ok:true,uses};
 }
 function consumeFifo(resourceId,amount,finishedCode,date){
   let left=amount,uses=[];
@@ -415,20 +478,31 @@ window.completeQueueBatch=()=>{
   const qty=Number(d.actualQty);
   if(qty<=0)return alert("Actual quantity must be above zero.");
   const recipe=db.recipes[item.blendId]||{};
-  const selected=[];
+  const prepared=[];
   for(const [rid,per] of Object.entries(recipe)){
-    const required=Number(per)*qty,lotId=d.selectedLots?.[rid],l=lot(lotId);
-    if(!l)return alert(`Choose a supplier lot for ${resource(rid)?.name||rid}.`);
-    if(Number(l.remaining)<required)return alert(`${l.supplierBatch} does not have enough ${resource(rid)?.name||rid}.`);
-    selected.push({rid,required,l});
+    const required=Number(per)*qty;
+    const allocations=d.lotAllocations?.[rid]||[];
+    const total=allocations.reduce((a,x)=>a+Number(x.amount||0),0);
+    if(Math.abs(total-required)>0.001)return alert(`${resource(rid)?.name||rid} is not fully allocated. Need ${fmt(required)}, allocated ${fmt(total)}.`);
+    const seen=new Set();
+    for(const a of allocations){
+      if(seen.has(a.lotId))return alert(`${resource(rid)?.name||rid} has the same supplier lot selected more than once.`);
+      seen.add(a.lotId);
+      const l=lot(a.lotId);
+      if(!l)return alert(`A supplier lot is missing for ${resource(rid)?.name||rid}.`);
+      if(Number(a.amount||0)<=0)return alert(`Enter an amount above zero for ${l.supplierBatch}.`);
+      if(Number(l.remaining)<Number(a.amount))return alert(`${l.supplierBatch} only has ${fmt(l.remaining)} available.`);
+    }
+    prepared.push({rid,required,allocations});
   }
   for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
     if(availableLots(rid).reduce((a,b)=>a+Number(b.remaining),0)<qty)return alert(`Not enough ${resource(rid)?.name||rid}. Record a delivery first.`);
   }
   const code=batchCode(item.blendId,d.date),inputs=[];
-  for(const x of selected){
-    consumeLot(x.l.id,x.required,code,d.date,x.rid);
-    inputs.push({resourceId:x.rid,name:resource(x.rid)?.name||x.rid,qty:x.required,unit:resource(x.rid)?.unit||"g",supplierBatch:x.l.supplierBatch,lotId:x.l.id});
+  for(const x of prepared){
+    const result=consumeExactAllocations(x.rid,x.allocations,code,d.date);
+    if(!result.ok)return alert(`Could not deduct ${resource(x.rid)?.name||x.rid}.`);
+    result.uses.forEach(u=>inputs.push({resourceId:x.rid,name:resource(x.rid)?.name||x.rid,qty:u.qty,unit:resource(x.rid)?.unit||"g",supplierBatch:u.supplierBatch,lotId:u.lotId}));
   }
   for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
     const result=consumeFifo(rid,qty,code,d.date);
@@ -584,7 +658,7 @@ window.saveSettings=()=>{db.settings={businessName:document.getElementById("setB
 window.saveBlendPrice=id=>{const b=blend(id);b.wholesale=Number(document.getElementById("wh-"+id).value);b.retail=Number(document.getElementById("rt-"+id).value);b.market=Number(document.getElementById("mk-"+id).value);save();logActivity("Selling prices updated",b.name);render()}
 
 function backupView(){
-  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><p><b>App version:</b> 1.1 Connected Production</p><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
+  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><p><b>App version:</b> 1.1.2 Multi-Lot Allocation</p><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
   <div class="actions"><button onclick="exportBackup()">Export full backup</button><button class="secondary" onclick="document.getElementById('importFile').click()">Import backup</button><input hidden id="importFile" type="file" accept=".json" onchange="importBackup(event)"><button class="danger" onclick="resetApp()">Reset all data</button></div>
   <p>${db.productionRuns.length} batches · ${db.ingredientBatches.length} supplier lots · ${db.orders.length} orders · ${db.haccp.length} HACCP records · ${(db.activity||[]).length} activity entries</p></section>`;
 }
