@@ -43,7 +43,7 @@ const seed = {
     LH:{salt:26,lemon:7,garlic:15,oregano:4,thyme:4,parsley:5,blackpepper:2,onion:5,brownsugar:2}
   },
   ingredientBatches:[],
-  productionRuns:[], productionPlans:[], productionDraft:null, customers:[], orders:[], deliveries:[], movements:[], haccp:[], activity:[], settings:{businessName:"Craic Larder",address:"",ehoNumber:"",defaultOperator:"James",labourPerBatch:0}
+  productionRuns:[], productionPlans:[], productionDraft:null, customers:[], orders:[], deliveries:[], movements:[], haccp:[], activity:[], packagingConfig:{pouch:{enabled:true,qtyPerPouch:1},frontlabel:{enabled:true,qtyPerPouch:1},backlabel:{enabled:true,qtyPerPouch:1},desiccant:{enabled:false,qtyPerPouch:0}}, settings:{businessName:"Craic Larder",address:"",ehoNumber:"",defaultOperator:"James",labourPerBatch:0}
 };
 
 let db = loadAndMigrate();
@@ -63,6 +63,17 @@ function loadAndMigrate(){
   if(!Array.isArray(out.ingredientBatches)) out.ingredientBatches=[];
   if(!Array.isArray(out.productionPlans)) out.productionPlans=[];
   if(out.productionDraft===undefined) out.productionDraft=null;
+  if(!out.packagingConfig || typeof out.packagingConfig!=="object"){
+    out.packagingConfig={
+      pouch:{enabled:true,qtyPerPouch:1},
+      frontlabel:{enabled:true,qtyPerPouch:1},
+      backlabel:{enabled:true,qtyPerPouch:1},
+      desiccant:{enabled:false,qtyPerPouch:0}
+    };
+  }
+  for(const r of out.resources.filter(x=>x.type==="Packaging")){
+    if(!out.packagingConfig[r.id])out.packagingConfig[r.id]={enabled:false,qtyPerPouch:0};
+  }
   out.resources=out.resources.map(r=>({...r,batch:undefined,active:r.active!==false}));
   out.blends=out.blends.map(b=>({...b,active:b.active!==false}));
   localStorage.setItem(DB_KEY,JSON.stringify(out));
@@ -76,6 +87,16 @@ function stock(id){return db.stock.find(x=>x.blendId===id)}
 function resource(id){return db.resources.find(x=>x.id===id)}
 function activeResources(){return db.resources.filter(r=>r.active!==false)}
 function activeBlends(){return db.blends.filter(b=>b.active!==false)}
+function packagingUsage(){
+  const config=db.packagingConfig||{};
+  return db.resources
+    .filter(r=>r.type==="Packaging"&&r.active!==false)
+    .map(r=>({resource:r,enabled:config[r.id]?.enabled===true,qtyPerPouch:Number(config[r.id]?.qtyPerPouch||0)}))
+    .filter(x=>x.enabled&&x.qtyPerPouch>0);
+}
+function packagingRequiredForPouches(pouches){
+  return packagingUsage().map(x=>({resourceId:x.resource.id,qty:Number(pouches)*x.qtyPerPouch,qtyPerPouch:x.qtyPerPouch}));
+}
 function lot(id){return db.ingredientBatches.find(x=>x.id===id)}
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[m]))}
 function options(items,valueKey,labelKey,selected=""){return items.map(x=>`<option value="${esc(x[valueKey])}" ${String(x[valueKey])===String(selected)?"selected":""}>${esc(x[labelKey])}</option>`).join("")}
@@ -105,8 +126,11 @@ function resourceValue(type){
 function blendCost(blendId){
   const rec=db.recipes[blendId]||{};
   const ingredients=Object.entries(rec).map(([rid,qty])=>({rid,qty:Number(qty),cost:Number(resource(rid)?.costPerUnit||0)*Number(qty)}));
-  const packagingIds=["pouch","frontlabel","backlabel","desiccant"];
-  const packaging=packagingIds.map(rid=>({rid,qty:1,cost:Number(resource(rid)?.costPerUnit||0)}));
+  const packaging=packagingUsage().map(x=>({
+    rid:x.resource.id,
+    qty:x.qtyPerPouch,
+    cost:Number(x.resource.costPerUnit||0)*x.qtyPerPouch
+  }));
   const ingredientCost=ingredients.reduce((a,b)=>a+b.cost,0);
   const packagingCost=packaging.reduce((a,b)=>a+b.cost,0);
   return {ingredients,packaging,ingredientCost,packagingCost,total:ingredientCost+packagingCost};
@@ -129,8 +153,8 @@ function planTotals(plan){
     for(const [rid,per] of Object.entries(recipe)){
       totals[rid]=(totals[rid]||0)+(Number(per)*Number(item.plannedQty||0));
     }
-    for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
-      totals[rid]=(totals[rid]||0)+Number(item.plannedQty||0);
+    for(const pkg of packagingRequiredForPouches(item.plannedQty||0)){
+      totals[pkg.resourceId]=(totals[pkg.resourceId]||0)+pkg.qty;
     }
   }
   return totals;
@@ -193,9 +217,9 @@ function plannerView(){
       const count=Math.floor(Number(resource(rid)?.qty||0)/Number(per));
       if(count<max){max=count;limiting=resource(rid)?.name||rid}
     }
-    for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
-      const count=Math.floor(Number(resource(rid)?.qty||0));
-      if(count<max){max=count;limiting=resource(rid)?.name||rid}
+    for(const pkg of packagingUsage()){
+      const count=Math.floor(Number(pkg.resource.qty||0)/pkg.qtyPerPouch);
+      if(count<max){max=count;limiting=pkg.resource.name}
     }
     if(max===Infinity)max=0;
     return {b,max,limiting};
@@ -292,8 +316,8 @@ window.addOpeningFinished=()=>{const blendId=document.getElementById("openBlend"
 
 function resourcesView(){app.innerHTML=`<section class="card"><h2>Add Ingredient or Packaging</h2><div class="row"><div><label>Name</label><input id="newResName"></div><div><label>Type</label><select id="newResType"><option>Ingredient</option><option>Packaging</option></select></div><div><label>Unit</label><select id="newResUnit"><option>g</option><option>kg</option><option>item</option><option>ml</option><option>litre</option><option>roll</option><option>box</option></select></div><div><label>Reorder level</label><input type="number" step="0.01" id="newResReorder" value="0"></div></div><div class="row"><div><label>Default supplier</label><input id="newResSupplier"></div><div><label>Cost per unit</label><input type="number" step="0.00001" id="newResCost" value="0"></div></div><button onclick="addResource()">Add resource</button></section><section class="card"><h2>Ingredients & Packaging</h2><input class="search-box" id="resSearch" placeholder="Search resources" oninput="renderResourceTable()"><div class="notice">Use Deliveries or Opening Balance to add physical stock.</div><div id="resourceTable"></div></section>`;renderResourceTable()}
 window.renderResourceTable=()=>{const q=(document.getElementById("resSearch")?.value||"").toLowerCase(),rows=db.resources.filter(r=>r.name.toLowerCase().includes(q)||r.type.toLowerCase().includes(q));document.getElementById("resourceTable").innerHTML=`<table><tr><th>Resource</th><th>Type</th><th>Available</th><th>Unit</th><th>Supplier</th><th>Cost/unit</th><th>Reorder</th><th>Actions</th></tr>${rows.map(r=>`<tr class="${r.active===false?'archived':''}"><td><input id="rn-${r.id}" value="${esc(r.name)}"></td><td><select id="rtp-${r.id}"><option ${r.type==="Ingredient"?"selected":""}>Ingredient</option><option ${r.type==="Packaging"?"selected":""}>Packaging</option></select></td><td>${fmt(r.qty)}</td><td><input id="ru-${r.id}" value="${esc(r.unit)}"></td><td><input id="rs-${r.id}" value="${esc(r.supplier||"")}"></td><td><input type="number" step="0.00001" id="rc-${r.id}" value="${r.costPerUnit||0}"></td><td><input type="number" step="0.01" id="rr-${r.id}" value="${r.reorder||0}"></td><td><div class="manager-actions"><button onclick="saveResource('${r.id}')">Save</button><button class="secondary" onclick="toggleResource('${r.id}')">${r.active===false?'Restore':'Archive'}</button></div></td></tr>`).join("")}</table>`}
-window.addResource=()=>{const name=document.getElementById("newResName").value.trim();if(!name)return alert("Enter a resource name.");const id="RES-"+Date.now().toString(36);db.resources.push({id,name,type:document.getElementById("newResType").value,unit:document.getElementById("newResUnit").value,qty:0,supplier:document.getElementById("newResSupplier").value,costPerUnit:Number(document.getElementById("newResCost").value),reorder:Number(document.getElementById("newResReorder").value),active:true});logActivity("Resource added",name);save();render()}
-window.saveResource=id=>{const r=resource(id);r.name=document.getElementById("rn-"+id).value.trim()||r.name;r.type=document.getElementById("rtp-"+id).value;r.unit=document.getElementById("ru-"+id).value.trim()||r.unit;r.supplier=document.getElementById("rs-"+id).value;r.costPerUnit=Number(document.getElementById("rc-"+id).value);r.reorder=Number(document.getElementById("rr-"+id).value);save();logActivity("Resource updated",r.name);render()}
+window.addResource=()=>{const name=document.getElementById("newResName").value.trim();if(!name)return alert("Enter a resource name.");const id="RES-"+Date.now().toString(36),type=document.getElementById("newResType").value;db.resources.push({id,name,type,unit:document.getElementById("newResUnit").value,qty:0,supplier:document.getElementById("newResSupplier").value,costPerUnit:Number(document.getElementById("newResCost").value),reorder:Number(document.getElementById("newResReorder").value),active:true});if(type==="Packaging"){db.packagingConfig=db.packagingConfig||{};db.packagingConfig[id]={enabled:false,qtyPerPouch:0};}logActivity("Resource added",name);save();render()}
+window.saveResource=id=>{const r=resource(id);r.name=document.getElementById("rn-"+id).value.trim()||r.name;r.type=document.getElementById("rtp-"+id).value;if(r.type==="Packaging"){db.packagingConfig=db.packagingConfig||{};if(!db.packagingConfig[id])db.packagingConfig[id]={enabled:false,qtyPerPouch:0};}r.unit=document.getElementById("ru-"+id).value.trim()||r.unit;r.supplier=document.getElementById("rs-"+id).value;r.costPerUnit=Number(document.getElementById("rc-"+id).value);r.reorder=Number(document.getElementById("rr-"+id).value);save();logActivity("Resource updated",r.name);render()}
 window.toggleResource=id=>{const r=resource(id);r.active=r.active===false;save();logActivity(r.active?"Resource restored":"Resource archived",r.name);render()}
 function blendsView(){app.innerHTML=`<section class="card"><h2>Add Blend</h2><div class="row"><div><label>Blend name</label><input id="newBlendName"></div><div><label>Short code</label><input id="newBlendCode" maxlength="6" placeholder="e.g. GH"></div><div><label>Wholesale</label><input type="number" step="0.01" id="newBlendWholesale" value="2.50"></div><div><label>Retail</label><input type="number" step="0.01" id="newBlendRetail" value="4.49"></div><div><label>Market</label><input type="number" step="0.01" id="newBlendMarket" value="4.50"></div></div><button onclick="addBlend()">Add blend</button></section><section class="card"><h2>Manage Blends</h2><table><tr><th>Name</th><th>Code</th><th>Wholesale</th><th>Retail</th><th>Market</th><th>Actions</th></tr>${db.blends.map(b=>`<tr class="${b.active===false?'archived':''}"><td><input id="bn-${b.id}" value="${esc(b.name)}"></td><td><b>${esc(b.id)}</b></td><td><input type="number" step="0.01" id="bw-${b.id}" value="${b.wholesale}"></td><td><input type="number" step="0.01" id="br-${b.id}" value="${b.retail}"></td><td><input type="number" step="0.01" id="bm-${b.id}" value="${b.market}"></td><td><div class="manager-actions"><button onclick="saveBlend('${b.id}')">Save</button><button class="secondary" onclick="toggleBlend('${b.id}')">${b.active===false?'Restore':'Archive'}</button></div></td></tr>`).join("")}</table></section>`}
 window.addBlend=()=>{const name=document.getElementById("newBlendName").value.trim(),code=document.getElementById("newBlendCode").value.trim().toUpperCase().replace(/[^A-Z0-9]/g,"");if(!name||!code)return alert("Enter a blend name and short code.");if(db.blends.some(b=>b.id===code))return alert("That blend code already exists.");db.blends.push({id:code,name,wholesale:Number(document.getElementById("newBlendWholesale").value),retail:Number(document.getElementById("newBlendRetail").value),market:Number(document.getElementById("newBlendMarket").value),active:true});db.stock.push({blendId:code,qty:0,low:10});db.recipes[code]={};logActivity("Blend added",name);save();render()}
@@ -370,7 +394,12 @@ function renderProductionDraft(draft){
   <h3>Exact Supplier Lots</h3>
   <div class="notice">Lots are allocated oldest-first automatically. You can adjust the amounts, but every ingredient must be fully covered before the batch can be completed.</div>
   ${requirements.map(req=>renderLotAllocation(req,draft)).join("")}
-  <h3>Packaging</h3><p>${qty} pouches, front labels, back labels and desiccants will be deducted FIFO.</p>
+  <h3>Packaging</h3>
+  ${packagingUsage().length
+    ? `<table><tr><th>Packaging</th><th>Per pouch</th><th>Total required</th></tr>
+       ${packagingUsage().map(x=>`<tr><td>${esc(x.resource.name)}</td><td>${fmt(x.qtyPerPouch)}</td><td>${fmt(x.qtyPerPouch*qty)} ${esc(x.resource.unit)}</td></tr>`).join("")}</table>
+       <p>Enabled packaging will be deducted FIFO.</p>`
+    : "<p>No packaging items are enabled.</p>"}
   <h3>HACCP link</h3><p>${haccpForDate(draft.date||today()).length} HACCP records currently match this production date. They will be linked automatically.</p>
   <div class="actions"><button onclick="completeQueueBatch()">Complete Batch & Generate Code</button><button class="secondary" onclick="cancelProductionDraft()">Pause and return later</button></div></section>`;
 }
@@ -495,8 +524,9 @@ window.completeQueueBatch=()=>{
     }
     prepared.push({rid,required,allocations});
   }
-  for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
-    if(availableLots(rid).reduce((a,b)=>a+Number(b.remaining),0)<qty)return alert(`Not enough ${resource(rid)?.name||rid}. Record a delivery first.`);
+  for(const pkg of packagingRequiredForPouches(qty)){
+    const available=availableLots(pkg.resourceId).reduce((a,b)=>a+Number(b.remaining),0);
+    if(available<pkg.qty)return alert(`Not enough ${resource(pkg.resourceId)?.name||pkg.resourceId}. Need ${fmt(pkg.qty)}, available ${fmt(available)}. Record a delivery first.`);
   }
   const code=batchCode(item.blendId,d.date),inputs=[];
   for(const x of prepared){
@@ -504,8 +534,9 @@ window.completeQueueBatch=()=>{
     if(!result.ok)return alert(`Could not deduct ${resource(x.rid)?.name||x.rid}.`);
     result.uses.forEach(u=>inputs.push({resourceId:x.rid,name:resource(x.rid)?.name||x.rid,qty:u.qty,unit:resource(x.rid)?.unit||"g",supplierBatch:u.supplierBatch,lotId:u.lotId}));
   }
-  for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
-    const result=consumeFifo(rid,qty,code,d.date);
+  for(const pkg of packagingRequiredForPouches(qty)){
+    const rid=pkg.resourceId;
+    const result=consumeFifo(rid,pkg.qty,code,d.date);
     result.uses.forEach(u=>inputs.push({resourceId:rid,name:resource(rid)?.name||rid,qty:u.qty,unit:resource(rid)?.unit||"item",supplierBatch:u.supplierBatch,lotId:u.lotId}));
   }
   stock(item.blendId).qty+=qty;
@@ -703,19 +734,43 @@ function settingsView(){
   <label>Default operator</label><input id="setOperator" value="${esc(s.defaultOperator||"James")}">
   <label>Optional labour cost per production batch</label><input type="number" step="0.01" id="setLabour" value="${Number(s.labourPerBatch||0)}">
   <div class="actions"><button onclick="saveSettings()">Save settings</button></div></section>
+  <section class="card"><h2>Packaging Manager</h2>
+  <div class="notice">Enable only packaging used for every pouch. Disabled items remain in historical records but are excluded from future planning, costing and stock deductions.</div>
+  <table><tr><th>Packaging</th><th>Enabled</th><th>Quantity per pouch</th><th>Current stock</th></tr>
+  ${db.resources.filter(r=>r.type==="Packaging"&&r.active!==false).map(r=>{
+    const cfg=db.packagingConfig?.[r.id]||{enabled:false,qtyPerPouch:0};
+    return `<tr><td>${esc(r.name)}</td>
+      <td><input type="checkbox" id="pkgEnabled-${r.id}" ${cfg.enabled?"checked":""}></td>
+      <td><input type="number" min="0" step="0.01" id="pkgQty-${r.id}" value="${Number(cfg.qtyPerPouch||0)}"></td>
+      <td>${fmt(r.qty)} ${esc(r.unit)}</td></tr>`;
+  }).join("")}</table>
+  <div class="actions"><button onclick="savePackagingConfig()">Save packaging setup</button></div></section>
   <section class="card"><h2>Blend selling prices</h2><table><tr><th>Blend</th><th>Wholesale</th><th>Retail</th><th>Market</th><th></th></tr>
   ${db.blends.map(b=>`<tr><td>${esc(b.name)}</td><td><input type="number" step="0.01" id="wh-${b.id}" value="${b.wholesale}"></td><td><input type="number" step="0.01" id="rt-${b.id}" value="${b.retail}"></td><td><input type="number" step="0.01" id="mk-${b.id}" value="${b.market}"></td><td><button onclick="saveBlendPrice('${b.id}')">Save</button></td></tr>`).join("")}</table></section>`;
 }
 window.saveSettings=()=>{db.settings={businessName:document.getElementById("setBusiness").value,address:document.getElementById("setAddress").value,ehoNumber:document.getElementById("setEho").value,defaultOperator:document.getElementById("setOperator").value,labourPerBatch:Number(document.getElementById("setLabour").value)};save();logActivity("Settings updated","Business settings changed");render()}
+window.savePackagingConfig=()=>{
+  db.packagingConfig=db.packagingConfig||{};
+  for(const r of db.resources.filter(x=>x.type==="Packaging"&&x.active!==false)){
+    db.packagingConfig[r.id]={
+      enabled:document.getElementById("pkgEnabled-"+r.id)?.checked===true,
+      qtyPerPouch:Number(document.getElementById("pkgQty-"+r.id)?.value||0)
+    };
+  }
+  save();
+  logActivity("Packaging setup updated",packagingUsage().map(x=>`${x.resource.name} x${x.qtyPerPouch}`).join(", ")||"No packaging enabled");
+  alert("Packaging setup saved.");
+  render();
+}
 window.saveBlendPrice=id=>{const b=blend(id);b.wholesale=Number(document.getElementById("wh-"+id).value);b.retail=Number(document.getElementById("rt-"+id).value);b.market=Number(document.getElementById("mk-"+id).value);save();logActivity("Selling prices updated",b.name);render()}
 
 function backupView(){
-  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><p><b>App version:</b> 1.1.3 Safe Delivery Delete</p><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
+  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><p><b>App version:</b> 1.1.4 Packaging Manager</p><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
   <div class="actions"><button onclick="exportBackup()">Export full backup</button><button class="secondary" onclick="document.getElementById('importFile').click()">Import backup</button><input hidden id="importFile" type="file" accept=".json" onchange="importBackup(event)"><button class="danger" onclick="resetApp()">Reset all data</button></div>
   <p>${db.productionRuns.length} batches · ${db.ingredientBatches.length} supplier lots · ${db.orders.length} orders · ${db.haccp.length} HACCP records · ${(db.activity||[]).length} activity entries</p></section>`;
 }
 window.exportBackup=()=>{const blob=new Blob([JSON.stringify(db,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`craic-hq-backup-${today()}.json`;a.click();URL.revokeObjectURL(a.href)}
-window.importBackup=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{db=JSON.parse(r.result);if(!Array.isArray(db.productionPlans))db.productionPlans=[];if(db.productionDraft===undefined)db.productionDraft=null;save();render();alert("Backup imported.")}catch{alert("Invalid backup file.")}};r.readAsText(f)}
+window.importBackup=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{db=JSON.parse(r.result);if(!Array.isArray(db.productionPlans))db.productionPlans=[];if(db.productionDraft===undefined)db.productionDraft=null;if(!db.packagingConfig)db.packagingConfig={pouch:{enabled:true,qtyPerPouch:1},frontlabel:{enabled:true,qtyPerPouch:1},backlabel:{enabled:true,qtyPerPouch:1},desiccant:{enabled:false,qtyPerPouch:0}};save();render();alert("Backup imported.")}catch{alert("Invalid backup file.")}};r.readAsText(f)}
 window.resetApp=()=>{if(confirm("Delete all Craic HQ data on this device?")){db=clone(seed);save();render()}}
 
 if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});

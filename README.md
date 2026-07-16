@@ -1,15 +1,20 @@
-# Craic HQ 1.1.3 — Safe Delivery Delete
+# Craic HQ 1.1.4 — Packaging Manager
 
-Data-preserving patch. The browser database key is unchanged.
+Data-preserving patch. Existing browser data remains under the same database key.
 
 Adds:
-- Delete button for unused supplier lots
-- Used or partly used lots are locked
-- Completed production traceability prevents deletion
-- Deleting an unused lot removes its matching inbound movement
-- Resource stock total is recalculated automatically
-- A deletion audit entry is retained
+- Packaging Manager under Settings
+- Enable/disable each packaging resource
+- Quantity used per finished pouch
+- Desiccant disabled by default
+- Enabled packaging feeds production planning, capacity, costing, validation, FIFO stock deduction and traceability
+- Historical production and traceability records remain unchanged
+- New packaging resources start disabled until you enable them
 
-No recipes, plans, batches, orders, costs, HACCP records or traceability records are changed.
+Default:
+- Black Pouch: enabled, 1 per pouch
+- Front Label: enabled, 1 per pouch
+- Back Label: enabled, 1 per pouch
+- Desiccant: disabled
 
-Export a backup before updating. Upload all files to the GitHub repository root and replace the existing files.
+Export a backup before updating, then upload all files to the root of the GitHub repository.
