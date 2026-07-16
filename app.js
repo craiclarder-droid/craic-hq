@@ -558,12 +558,64 @@ function deliveriesView(){
   <div class="row"><div><label>Supplier</label><input id="dSupplier"></div><div><label>Supplier batch code</label><input id="dBatch"></div>
   <div><label>Best before</label><input id="dBBE" type="date"></div></div>
   <label>Notes</label><textarea id="dNotes"></textarea><div class="actions"><button onclick="addDelivery()">Save delivery lot</button><button class="secondary" onclick="addOpeningBalance()">Save as opening balance</button></div></section>
-  <section class="card"><h2>Delivery History</h2><table><tr><th>Date</th><th>Resource</th><th>Supplier batch</th><th>Received</th><th>Remaining</th><th>Supplier</th></tr>
-  ${db.ingredientBatches.slice().reverse().map(d=>`<tr><td>${d.receivedDate}</td><td>${resource(d.resourceId)?.name||""}</td><td><b>${esc(d.supplierBatch)}</b></td><td>${fmt(d.quantity)}</td><td>${fmt(d.remaining)}</td><td>${esc(d.supplier)}</td></tr>`).join("")}</table></section>`;
+  <section class="card"><h2>Delivery History</h2><table><tr><th>Date</th><th>Resource</th><th>Supplier batch</th><th>Received</th><th>Remaining</th><th>Supplier</th><th>Action</th></tr>
+  ${db.ingredientBatches.slice().reverse().map(d=>{
+    const used=Number(d.remaining)<Number(d.quantity) || db.productionRuns.some(r=>(r.inputs||r.ingredients||[]).some(i=>i.lotId===d.id));
+    return `<tr><td>${d.receivedDate}</td><td>${resource(d.resourceId)?.name||""}</td><td><b>${esc(d.supplierBatch)}</b></td><td>${fmt(d.quantity)}</td><td>${fmt(d.remaining)}</td><td>${esc(d.supplier)}</td>
+    <td>${used?'<span class="badge warn">Used — locked</span>':`<button class="danger" onclick="deleteDeliveryLot('${d.id}')">Delete</button>`}</td></tr>`;
+  }).join("")}</table></section>`;
 }
-function saveLot(mode){const resourceId=document.getElementById("dRes").value,r=resource(resourceId),qty=Number(document.getElementById("dQty").value);let supplierBatch=document.getElementById("dBatch").value.trim();if(qty<=0)return alert("Enter a valid quantity.");if(!supplierBatch)supplierBatch=mode==="Opening Balance"?"UNKNOWN-OPENING":"";if(!supplierBatch)return alert("Supplier batch code is required for traceability.");const d={id:uid("LOT"),receivedDate:document.getElementById("dDate").value,resourceId,quantity:qty,remaining:qty,cost:Number(document.getElementById("dCost").value),supplier:document.getElementById("dSupplier").value,supplierBatch,bestBefore:document.getElementById("dBBE").value,notes:document.getElementById("dNotes").value,entryType:mode};db.ingredientBatches.push(d);db.deliveries.push({...d});r.supplier=d.supplier||r.supplier;if(d.cost>0)r.costPerUnit=d.cost/qty;recalcResourceQty(resourceId);logActivity(mode,`${r.name}: ${qty} ${r.unit}, lot ${supplierBatch}`,d.receivedDate);db.movements.push({id:uid("MOV"),date:d.receivedDate,type:mode==="Opening Balance"?"OPENING RESOURCE IN":"RESOURCE IN",blendId:"",resourceId,qty,batchCode:"",supplierBatch,notes:mode==="Opening Balance"?"Opening balance":`Delivery from ${d.supplier}`});save();render()}
+function saveLot(mode){const resourceId=document.getElementById("dRes").value,r=resource(resourceId),qty=Number(document.getElementById("dQty").value);let supplierBatch=document.getElementById("dBatch").value.trim();if(qty<=0)return alert("Enter a valid quantity.");if(!supplierBatch)supplierBatch=mode==="Opening Balance"?"UNKNOWN-OPENING":"";if(!supplierBatch)return alert("Supplier batch code is required for traceability.");const d={id:uid("LOT"),receivedDate:document.getElementById("dDate").value,resourceId,quantity:qty,remaining:qty,cost:Number(document.getElementById("dCost").value),supplier:document.getElementById("dSupplier").value,supplierBatch,bestBefore:document.getElementById("dBBE").value,notes:document.getElementById("dNotes").value,entryType:mode};db.ingredientBatches.push(d);db.deliveries.push({...d});r.supplier=d.supplier||r.supplier;if(d.cost>0)r.costPerUnit=d.cost/qty;recalcResourceQty(resourceId);logActivity(mode,`${r.name}: ${qty} ${r.unit}, lot ${supplierBatch}`,d.receivedDate);db.movements.push({id:uid("MOV"),date:d.receivedDate,type:mode==="Opening Balance"?"OPENING RESOURCE IN":"RESOURCE IN",blendId:"",resourceId,qty,batchCode:"",supplierBatch,lotId:d.id,notes:mode==="Opening Balance"?"Opening balance":`Delivery from ${d.supplier}`});save();render()}
 window.addDelivery=()=>saveLot("Delivery received")
 window.addOpeningBalance=()=>saveLot("Opening Balance")
+
+window.deleteDeliveryLot=(lotId)=>{
+  const deliveryLot=lot(lotId);
+  if(!deliveryLot)return alert("This supplier lot could not be found.");
+
+  const usedInProduction=db.productionRuns.some(run=>
+    (run.inputs||run.ingredients||[]).some(input=>input.lotId===lotId)
+  );
+  const quantityUsed=Number(deliveryLot.remaining)<Number(deliveryLot.quantity);
+
+  if(usedInProduction||quantityUsed){
+    return alert("This delivery cannot be deleted because some or all of the lot has already been used. It must remain for traceability.");
+  }
+
+  const itemName=resource(deliveryLot.resourceId)?.name||deliveryLot.resourceId;
+  const confirmed=confirm(
+    `Delete this unused delivery?\n\n${itemName}\nLot: ${deliveryLot.supplierBatch}\nQuantity: ${fmt(deliveryLot.quantity)} ${resource(deliveryLot.resourceId)?.unit||""}\n\nThis cannot be undone.`
+  );
+  if(!confirmed)return;
+
+  db.ingredientBatches=db.ingredientBatches.filter(entry=>entry.id!==lotId);
+  db.deliveries=db.deliveries.filter(entry=>entry.id!==lotId);
+
+  // Remove only the matching inbound stock movement.
+  let removedMovement=false;
+  db.movements=db.movements.filter(movement=>{
+    if(removedMovement)return true;
+
+    const exactLotMatch=movement.lotId===lotId;
+    const legacyExactMatch=!movement.lotId &&
+      movement.resourceId===deliveryLot.resourceId &&
+      movement.supplierBatch===deliveryLot.supplierBatch &&
+      movement.date===deliveryLot.receivedDate &&
+      Number(movement.qty)===Number(deliveryLot.quantity) &&
+      (movement.type==="RESOURCE IN"||movement.type==="OPENING RESOURCE IN");
+
+    if(exactLotMatch||legacyExactMatch){
+      removedMovement=true;
+      return false;
+    }
+    return true;
+  });
+
+  recalcResourceQty(deliveryLot.resourceId);
+  logActivity("Unused delivery deleted",`${itemName}: lot ${deliveryLot.supplierBatch}, ${deliveryLot.quantity} ${resource(deliveryLot.resourceId)?.unit||""}`);
+  save();
+  render();
+}
 
 function traceabilityView(){
   app.innerHTML=`<section class="card"><h2>Traceability Search</h2><label>Finished batch, supplier batch, blend or customer</label>
@@ -658,7 +710,7 @@ window.saveSettings=()=>{db.settings={businessName:document.getElementById("setB
 window.saveBlendPrice=id=>{const b=blend(id);b.wholesale=Number(document.getElementById("wh-"+id).value);b.retail=Number(document.getElementById("rt-"+id).value);b.market=Number(document.getElementById("mk-"+id).value);save();logActivity("Selling prices updated",b.name);render()}
 
 function backupView(){
-  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><p><b>App version:</b> 1.1.2 Multi-Lot Allocation</p><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
+  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><p><b>App version:</b> 1.1.3 Safe Delivery Delete</p><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
   <div class="actions"><button onclick="exportBackup()">Export full backup</button><button class="secondary" onclick="document.getElementById('importFile').click()">Import backup</button><input hidden id="importFile" type="file" accept=".json" onchange="importBackup(event)"><button class="danger" onclick="resetApp()">Reset all data</button></div>
   <p>${db.productionRuns.length} batches · ${db.ingredientBatches.length} supplier lots · ${db.orders.length} orders · ${db.haccp.length} HACCP records · ${(db.activity||[]).length} activity entries</p></section>`;
 }
