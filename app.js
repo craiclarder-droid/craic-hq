@@ -43,7 +43,7 @@ const seed = {
     LH:{salt:26,lemon:7,garlic:15,oregano:4,thyme:4,parsley:5,blackpepper:2,onion:5,brownsugar:2}
   },
   ingredientBatches:[],
-  productionRuns:[], customers:[], orders:[], deliveries:[], movements:[], haccp:[], activity:[], settings:{businessName:"Craic Larder",address:"",ehoNumber:"",defaultOperator:"James",labourPerBatch:0}
+  productionRuns:[], productionPlans:[], productionDraft:null, customers:[], orders:[], deliveries:[], movements:[], haccp:[], activity:[], settings:{businessName:"Craic Larder",address:"",ehoNumber:"",defaultOperator:"James",labourPerBatch:0}
 };
 
 let db = loadAndMigrate();
@@ -61,6 +61,8 @@ function loadAndMigrate(){
   const out=loaded||clone(seed);
   for(const [k,v] of Object.entries(seed)) if(out[k]===undefined) out[k]=clone(v);
   if(!Array.isArray(out.ingredientBatches)) out.ingredientBatches=[];
+  if(!Array.isArray(out.productionPlans)) out.productionPlans=[];
+  if(out.productionDraft===undefined) out.productionDraft=null;
   out.resources=out.resources.map(r=>({...r,batch:undefined,active:r.active!==false}));
   out.blends=out.blends.map(b=>({...b,active:b.active!==false}));
   localStorage.setItem(DB_KEY,JSON.stringify(out));
@@ -116,7 +118,33 @@ function finishedStockRetailValue(){
   return db.stock.reduce((sum,s)=>sum+(Number(s.qty||0)*Number(blend(s.blendId)?.retail||0)),0);
 }
 
-function nav(v){currentView=v;preparedProduction=null;render()}
+function currentPlan(){
+  return db.productionPlans.find(p=>p.status!=="Completed") || null;
+}
+function planTotals(plan){
+  const totals={};
+  if(!plan) return totals;
+  for(const item of plan.items.filter(i=>i.status!=="Cancelled")){
+    const recipe=db.recipes[item.blendId]||{};
+    for(const [rid,per] of Object.entries(recipe)){
+      totals[rid]=(totals[rid]||0)+(Number(per)*Number(item.plannedQty||0));
+    }
+    for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
+      totals[rid]=(totals[rid]||0)+Number(item.plannedQty||0);
+    }
+  }
+  return totals;
+}
+function haccpForDate(date){
+  return db.haccp.filter(h=>h.date===date).map(h=>h.id);
+}
+function updatePlanStatus(plan){
+  if(!plan)return;
+  const live=plan.items.filter(i=>i.status!=="Cancelled");
+  plan.status=live.length&&live.every(i=>i.status==="Completed")?"Completed":live.some(i=>i.status==="Completed"||i.status==="In Progress")?"In Progress":"Planned";
+}
+
+function nav(v){currentView=v;render()}
 document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>nav(b.dataset.view));
 document.getElementById("menuBtn").onclick=()=>document.getElementById("nav").scrollIntoView({behavior:"smooth"});
 
@@ -153,8 +181,102 @@ function dashboard(){
   </section></div>
   <section class="card"><h2>Recent activity</h2>${recent.length?`<table><tr><th>Date</th><th>Time</th><th>Action</th><th>Details</th></tr>${recent.map(a=>`<tr><td>${a.date}</td><td>${a.time}</td><td>${esc(a.type)}</td><td>${esc(a.details)}</td></tr>`).join("")}</table>`:"<p>No activity recorded yet.</p>"}</section>`;
 }
-function plannerView(){const plans=activeBlends().map(b=>{const rec=db.recipes[b.id]||{};let max=Infinity,limiting="";for(const [rid,per] of Object.entries(rec)){if(Number(per)<=0)continue;const possible=Math.floor(Number(resource(rid)?.qty||0)/Number(per));if(possible<max){max=possible;limiting=resource(rid)?.name||rid}}for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){const possible=Math.floor(Number(resource(rid)?.qty||0));if(possible<max){max=possible;limiting=resource(rid)?.name||rid}}if(max===Infinity)max=0;return {b,max,limiting}});app.innerHTML=`<section class="card"><h2>Production Planner</h2><div class="notice">Maximum pouches available from current stock.</div><div class="grid">${plans.map(p=>`<section class="card plan-card"><h3>${esc(p.b.name)}</h3><div class="kpi">${p.max}</div><div class="muted">pouches possible</div><p><b>Limiting item:</b> ${esc(p.limiting||"Recipe incomplete")}</p></section>`).join("")}</div></section><section class="card"><h2>Plan a Batch & Shopping List</h2><div class="row"><div><label>Blend</label><select id="planBlend">${options(activeBlends(),"id","name")}</select></div><div><label>Pouches planned</label><input type="number" id="planQty" value="40" min="1"></div></div><button onclick="calculateShopping()">Calculate shortages</button><div id="shoppingResult"></div></section>`}
-window.calculateShopping=()=>{const blendId=document.getElementById("planBlend").value,qty=Number(document.getElementById("planQty").value),rec=db.recipes[blendId]||{},rows=[];for(const [rid,per] of Object.entries(rec)){const need=Number(per)*qty,have=Number(resource(rid)?.qty||0);rows.push({name:resource(rid)?.name||rid,need,have,short:Math.max(0,need-have),unit:resource(rid)?.unit||"g"})}for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){const need=qty,have=Number(resource(rid)?.qty||0);rows.push({name:resource(rid)?.name||rid,need,have,short:Math.max(0,need-have),unit:resource(rid)?.unit||"item"})}document.getElementById("shoppingResult").innerHTML=`<h3>Requirements for ${qty} ${blend(blendId).name}</h3><table><tr><th>Resource</th><th>Need</th><th>Have</th><th>Order</th></tr>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${fmt(r.need)} ${r.unit}</td><td>${fmt(r.have)} ${r.unit}</td><td><b>${r.short>0?fmt(r.short)+" "+r.unit:"Enough"}</b></td></tr>`).join("")}</table>`}
+function plannerView(){
+  const plan=currentPlan();
+  const values={};
+  if(plan) plan.items.forEach(i=>values[i.blendId]=i.plannedQty);
+
+  const possible=activeBlends().map(b=>{
+    const rec=db.recipes[b.id]||{};let max=Infinity,limiting="";
+    for(const [rid,per] of Object.entries(rec)){
+      if(Number(per)<=0)continue;
+      const count=Math.floor(Number(resource(rid)?.qty||0)/Number(per));
+      if(count<max){max=count;limiting=resource(rid)?.name||rid}
+    }
+    for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
+      const count=Math.floor(Number(resource(rid)?.qty||0));
+      if(count<max){max=count;limiting=resource(rid)?.name||rid}
+    }
+    if(max===Infinity)max=0;
+    return {b,max,limiting};
+  });
+
+  app.innerHTML=`<section class="card"><h2>Multi-Blend Production Plan</h2>
+  <div class="notice">Enter every blend you intend to make. The plan is saved permanently and remains available when you change tabs, close the app, or continue production on another day.</div>
+  <label>Plan name</label><input id="planName" value="${esc(plan?.name||("Production Plan "+today()))}">
+  <table><tr><th>Blend</th><th>Pouches planned</th><th>Current status</th><th>Completed batch</th></tr>
+  ${activeBlends().map(b=>{
+    const item=plan?.items.find(i=>i.blendId===b.id);
+    return `<tr><td>${esc(b.name)}</td><td><input type="number" min="0" id="pq-${b.id}" value="${Number(values[b.id]||0)}"></td>
+    <td>${esc(item?.status||"Not planned")}</td><td>${esc(item?.batchCode||"")}</td></tr>`;
+  }).join("")}</table>
+  <div class="actions"><button onclick="saveProductionPlan()">Save / Update Plan</button>
+  ${plan?'<button class="secondary" onclick="clearProductionPlan()">Clear Active Plan</button>':""}</div></section>
+
+  ${plan?renderPlanSummary(plan):'<section class="card"><p>No active production plan yet.</p></section>'}
+
+  <section class="card"><h2>Current Stock Capacity</h2>
+  <div class="grid">${possible.map(p=>`<section class="card plan-card"><h3>${esc(p.b.name)}</h3><div class="kpi">${p.max}</div><div class="muted">pouches possible now</div><p><b>Limiting item:</b> ${esc(p.limiting||"Recipe incomplete")}</p></section>`).join("")}</div></section>`;
+}
+function renderPlanSummary(plan){
+  const totals=planTotals(plan);
+  const rows=Object.entries(totals).map(([rid,need])=>{
+    const r=resource(rid),have=Number(r?.qty||0),short=Math.max(0,need-have);
+    const status=plan.shoppingStatuses?.[rid] || (short>0?"Needs ordering":"In stock");
+    return {rid,r,need,have,short,status};
+  }).sort((a,b)=>(a.r?.name||"").localeCompare(b.r?.name||""));
+
+  return `<section class="card"><h2>${esc(plan.name)}</h2>
+  <p><b>Status:</b> ${esc(plan.status)} · <b>Created:</b> ${esc(plan.createdDate)}</p>
+  <h3>Production Queue</h3>
+  <table><tr><th>Blend</th><th>Planned</th><th>Status</th><th>Actual</th><th>Batch</th></tr>
+  ${plan.items.filter(i=>i.status!=="Cancelled").map(i=>`<tr><td>${esc(blend(i.blendId)?.name||i.blendId)}</td><td>${i.plannedQty}</td><td>${esc(i.status)}</td><td>${i.actualQty||""}</td><td>${esc(i.batchCode||"")}</td></tr>`).join("")}</table>
+
+  <h3>Combined Ingredient & Packaging Requirements</h3>
+  <table><tr><th>Resource</th><th>Total needed</th><th>In stock</th><th>Short / spare</th><th>Ordering status</th></tr>
+  ${rows.map(x=>`<tr><td>${esc(x.r?.name||x.rid)}</td><td>${fmt(x.need)} ${esc(x.r?.unit||"")}</td><td>${fmt(x.have)} ${esc(x.r?.unit||"")}</td>
+  <td class="${x.short>0?'bad':'good'}">${x.short>0?"Order "+fmt(x.short):fmt(x.have-x.need)+" spare"} ${esc(x.r?.unit||"")}</td>
+  <td><select onchange="setShoppingStatus('${x.rid}',this.value)">
+  ${["Needs ordering","In basket","Ordered","Part received","Received","In stock"].map(s=>`<option ${s===x.status?"selected":""}>${s}</option>`).join("")}
+  </select></td></tr>`).join("")}</table>
+  <div class="actions"><button onclick="nav('production')">Open Production Queue</button></div></section>`;
+}
+window.saveProductionPlan=()=>{
+  let plan=currentPlan();
+  const items=activeBlends().map(b=>({blendId:b.id,plannedQty:Number(document.getElementById("pq-"+b.id).value||0)})).filter(i=>i.plannedQty>0);
+  if(!items.length)return alert("Enter at least one blend quantity.");
+  if(!plan){
+    plan={id:uid("PLAN"),name:document.getElementById("planName").value.trim()||("Production Plan "+today()),createdDate:today(),status:"Planned",shoppingStatuses:{},items:items.map(i=>({id:uid("PI"),...i,status:"Planned",actualQty:null,batchCode:""}))};
+    db.productionPlans.push(plan);
+    logActivity("Production plan created",plan.name);
+  }else{
+    plan.name=document.getElementById("planName").value.trim()||plan.name;
+    for(const entered of items){
+      const existing=plan.items.find(i=>i.blendId===entered.blendId);
+      if(existing){
+        if(existing.status!=="Completed")existing.plannedQty=entered.plannedQty;
+      }else{
+        plan.items.push({id:uid("PI"),...entered,status:"Planned",actualQty:null,batchCode:""});
+      }
+    }
+    for(const existing of plan.items){
+      if(existing.status!=="Completed"&&!items.some(i=>i.blendId===existing.blendId))existing.status="Cancelled";
+    }
+    updatePlanStatus(plan);
+    logActivity("Production plan updated",plan.name);
+  }
+  save();render();
+}
+window.setShoppingStatus=(rid,status)=>{
+  const plan=currentPlan();if(!plan)return;
+  plan.shoppingStatuses=plan.shoppingStatuses||{};plan.shoppingStatuses[rid]=status;save();
+}
+window.clearProductionPlan=()=>{
+  const plan=currentPlan();if(!plan)return;
+  if(!confirm("Clear the active plan? Completed production records will remain."))return;
+  plan.items.filter(i=>i.status!=="Completed").forEach(i=>i.status="Cancelled");
+  updatePlanStatus(plan);save();logActivity("Production plan cleared",plan.name);render();
+}
 
 function stockView(){
   app.innerHTML=`<section class="card"><h2>Add Opening Finished Stock</h2><div class="row"><div><label>Blend</label><select id="openBlend">${options(activeBlends(),"id","name")}</select></div><div><label>Quantity</label><input type="number" id="openQty" min="1"></div><div><label>Opening batch code</label><input id="openBatch" placeholder="e.g. GH-OPEN-160726"></div></div><button onclick="addOpeningFinished()">Add opening finished stock</button></section><section class="card"><h2>Finished Stock</h2>
@@ -211,37 +333,67 @@ window.saveRecipe=()=>{
 }
 
 function productionView(){
-  app.innerHTML=`<section class="card"><h2>Record Production Run</h2>
-  <div class="row"><div><label>Date</label><input type="date" id="prDate" value="${today()}"></div>
-  <div><label>Blend</label><select id="prBlend">${options(activeBlends(),"id","name")}</select></div>
-  <div><label>Pouches made</label><input type="number" id="prQty" min="1" value="10"></div>
-  <div><label>Completed by</label><input id="prBy" value="${esc(db.settings?.defaultOperator||"James")}"></div></div>
-  <label>Notes</label><textarea id="prNotes"></textarea>
-  <div class="actions"><button onclick="prepareProduction()">Calculate requirements & choose batches</button></div></section>
-  <div id="productionPlan"></div>
-  <section class="card"><h2>Production History</h2><table><tr><th>Batch</th><th>Date</th><th>Blend</th><th>Qty</th><th>By</th></tr>
-  ${db.productionRuns.slice().reverse().map(r=>`<tr><td><b>${r.batchCode}</b></td><td>${r.date}</td><td>${blend(r.blendId).name}</td><td>${r.qty}</td><td>${esc(r.completedBy||"")}</td></tr>`).join("")}</table></section>`;
+  const plan=currentPlan();
+  const queue=plan?plan.items.filter(i=>i.status==="Planned"||i.status==="In Progress"):[];
+  const draft=db.productionDraft;
+  app.innerHTML=`<section class="card"><h2>Production Queue</h2>
+  ${plan?`<p><b>${esc(plan.name)}</b> · ${esc(plan.status)}</p>`:'<div class="notice">Create a saved plan in Production Planner first.</div>'}
+  <table><tr><th>Blend</th><th>Planned</th><th>Status</th><th>Action</th></tr>
+  ${queue.map(i=>`<tr><td>${esc(blend(i.blendId)?.name||i.blendId)}</td><td>${i.plannedQty}</td><td>${esc(i.status)}</td>
+  <td><button onclick="startQueueItem('${plan.id}','${i.id}')">${i.status==="In Progress"?"Continue batch":"Start batch"}</button></td></tr>`).join("")}</table></section>
+  <div id="productionPlan">${draft?renderProductionDraft(draft):""}</div>
+  <section class="card"><h2>Production History</h2><table><tr><th>Batch</th><th>Date</th><th>Blend</th><th>Planned</th><th>Actual</th><th>By</th></tr>
+  ${db.productionRuns.slice().reverse().map(r=>`<tr><td><b>${r.batchCode}</b></td><td>${r.date}</td><td>${esc(blend(r.blendId)?.name||r.blendId)}</td><td>${r.plannedQty||r.qty}</td><td>${r.qty}</td><td>${esc(r.completedBy||"")}</td></tr>`).join("")}</table></section>`;
 }
-window.prepareProduction=()=>{
-  const date=document.getElementById("prDate").value,blendId=document.getElementById("prBlend").value,qty=Number(document.getElementById("prQty").value);
-  if(!date||qty<=0)return alert("Enter a valid date and quantity.");
-  const rec=db.recipes[blendId]||{};
+window.startQueueItem=(planId,itemId)=>{
+  const plan=db.productionPlans.find(p=>p.id===planId),item=plan?.items.find(i=>i.id===itemId);
+  if(!item)return alert("Queue item not found.");
+  item.status="In Progress";updatePlanStatus(plan);
+  db.productionDraft={planId,itemId,date:today(),actualQty:item.actualQty||item.plannedQty,completedBy:db.settings?.defaultOperator||"James",notes:"",wastage:0,wastageReason:""};
+  save();render();
+}
+function renderProductionDraft(draft){
+  const plan=db.productionPlans.find(p=>p.id===draft.planId),item=plan?.items.find(i=>i.id===draft.itemId);
+  if(!item)return "";
+  const rec=db.recipes[item.blendId]||{};
+  const qty=Number(draft.actualQty||item.plannedQty);
   const requirements=Object.entries(rec).map(([rid,per])=>({resourceId:rid,required:Number(per)*qty,lots:availableLots(rid)}));
-  preparedProduction={date,blendId,qty,completedBy:document.getElementById("prBy").value,notes:document.getElementById("prNotes").value,requirements};
-  document.getElementById("productionPlan").innerHTML=`<section class="card"><h2>Choose exact supplier batches</h2>
-  <div class="notice">FIFO is suggested automatically. Select the exact lot used for each ingredient.</div>
+  return `<section class="card"><h2>Complete ${esc(blend(item.blendId)?.name||item.blendId)}</h2>
+  <div class="row"><div><label>Production date</label><input type="date" id="qdDate" value="${esc(draft.date||today())}"></div>
+  <div><label>Planned pouches</label><input value="${item.plannedQty}" disabled></div>
+  <div><label>Actual pouches made</label><input type="number" min="1" id="qdActual" value="${qty}" onchange="updateProductionDraft()"></div>
+  <div><label>Operator</label><input id="qdBy" value="${esc(draft.completedBy||"")}" onchange="updateProductionDraft()"></div></div>
+  <div class="row"><div><label>Wastage / lost pouches</label><input type="number" min="0" id="qdWaste" value="${Number(draft.wastage||0)}" onchange="updateProductionDraft()"></div>
+  <div><label>Wastage reason</label><input id="qdWasteReason" value="${esc(draft.wastageReason||"")}" onchange="updateProductionDraft()"></div></div>
+  <label>Production notes</label><textarea id="qdNotes" onchange="updateProductionDraft()">${esc(draft.notes||"")}</textarea>
+  <h3>Exact Supplier Lots</h3>
+  <div class="notice">Select the precise supplier lot used for each ingredient. The requirement automatically follows the actual yield above.</div>
   ${requirements.map((req,i)=>{
-    const r=resource(req.resourceId), total=req.lots.reduce((a,b)=>a+Number(b.remaining),0);
-    return `<div class="batch-choice"><b>${esc(r.name)}</b> — need ${fmt(req.required)} ${r.unit} · available ${fmt(total)}
-    <label>Supplier lot used</label><select id="lot-${i}">
-    <option value="">Choose lot</option>${req.lots.map(l=>`<option value="${l.id}">${esc(l.supplierBatch)} · ${fmt(l.remaining)} ${r.unit} left · ${esc(l.supplier)}</option>`).join("")}
-    </select></div>`;
+    const r=resource(req.resourceId),selected=draft.selectedLots?.[req.resourceId]||"";
+    return `<div class="batch-choice"><b>${esc(r?.name||req.resourceId)}</b> — need ${fmt(req.required)} ${esc(r?.unit||"")}
+    <label>Supplier lot</label><select id="qLot-${req.resourceId}" onchange="updateProductionDraft()"><option value="">Choose lot</option>
+    ${req.lots.map(l=>`<option value="${l.id}" ${l.id===selected?"selected":""}>${esc(l.supplierBatch)} · ${fmt(l.remaining)} ${esc(r?.unit||"")} left · ${esc(l.supplier)}</option>`).join("")}</select></div>`;
   }).join("")}
-  <h3>Packaging</h3><p>${qty} pouches, ${qty} front labels, ${qty} back labels and ${qty} desiccants will be deducted by FIFO.</p>
-  <div class="actions"><button onclick="completeProduction()">Complete production & create batch</button></div></section>`;
+  <h3>Packaging</h3><p>${qty} pouches, front labels, back labels and desiccants will be deducted FIFO.</p>
+  <h3>HACCP link</h3><p>${haccpForDate(draft.date||today()).length} HACCP records currently match this production date. They will be linked automatically.</p>
+  <div class="actions"><button onclick="completeQueueBatch()">Complete Batch & Generate Code</button><button class="secondary" onclick="cancelProductionDraft()">Pause and return later</button></div></section>`;
 }
+window.updateProductionDraft=()=>{
+  const d=db.productionDraft;if(!d)return;
+  d.date=document.getElementById("qdDate")?.value||d.date;
+  d.actualQty=Number(document.getElementById("qdActual")?.value||d.actualQty);
+  d.completedBy=document.getElementById("qdBy")?.value||d.completedBy;
+  d.notes=document.getElementById("qdNotes")?.value||"";
+  d.wastage=Number(document.getElementById("qdWaste")?.value||0);
+  d.wastageReason=document.getElementById("qdWasteReason")?.value||"";
+  d.selectedLots=d.selectedLots||{};
+  document.querySelectorAll('[id^="qLot-"]').forEach(el=>d.selectedLots[el.id.replace("qLot-","")]=el.value);
+  save();
+  render();
+}
+window.cancelProductionDraft=()=>{save();nav("planner")}
 function consumeLot(lotId,amount,finishedCode,date,resourceId){
-  const l=lot(lotId); if(!l||Number(l.remaining)<amount)return false;
+  const l=lot(lotId);if(!l||Number(l.remaining)<amount)return false;
   l.remaining=Number(l.remaining)-amount;
   db.movements.push({id:uid("MOV"),date,type:"RESOURCE OUT",blendId:"",resourceId,qty:-amount,batchCode:finishedCode,supplierBatch:l.supplierBatch,notes:`Used supplier lot ${l.supplierBatch} in ${finishedCode}`});
   recalcResourceQty(resourceId);return true;
@@ -250,39 +402,46 @@ function consumeFifo(resourceId,amount,finishedCode,date){
   let left=amount,uses=[];
   for(const l of availableLots(resourceId)){
     if(left<=0)break;
-    const take=Math.min(Number(l.remaining),left);
-    l.remaining-=take;left-=take;
+    const take=Math.min(Number(l.remaining),left);l.remaining-=take;left-=take;
     uses.push({lotId:l.id,supplierBatch:l.supplierBatch,qty:take});
     db.movements.push({id:uid("MOV"),date,type:"RESOURCE OUT",blendId:"",resourceId,qty:-take,batchCode:finishedCode,supplierBatch:l.supplierBatch,notes:`Used in ${finishedCode}`});
   }
   recalcResourceQty(resourceId);return {ok:left<=0,uses,left};
 }
-window.completeProduction=()=>{
-  if(!preparedProduction)return alert("Calculate requirements first.");
-  const {date,blendId,qty,completedBy,notes,requirements}=preparedProduction;
+window.completeQueueBatch=()=>{
+  updateProductionDraft();
+  const d=db.productionDraft,plan=db.productionPlans.find(p=>p.id===d?.planId),item=plan?.items.find(i=>i.id===d?.itemId);
+  if(!d||!item)return alert("No production draft found.");
+  const qty=Number(d.actualQty);
+  if(qty<=0)return alert("Actual quantity must be above zero.");
+  const recipe=db.recipes[item.blendId]||{};
   const selected=[];
-  for(let i=0;i<requirements.length;i++){
-    const req=requirements[i],lotId=document.getElementById("lot-"+i).value,l=lot(lotId);
-    if(!l)return alert(`Choose a supplier lot for ${resource(req.resourceId).name}.`);
-    if(Number(l.remaining)<req.required)return alert(`${l.supplierBatch} does not contain enough ${resource(req.resourceId).name}.`);
-    selected.push({req,lot:l});
+  for(const [rid,per] of Object.entries(recipe)){
+    const required=Number(per)*qty,lotId=d.selectedLots?.[rid],l=lot(lotId);
+    if(!l)return alert(`Choose a supplier lot for ${resource(rid)?.name||rid}.`);
+    if(Number(l.remaining)<required)return alert(`${l.supplierBatch} does not have enough ${resource(rid)?.name||rid}.`);
+    selected.push({rid,required,l});
   }
   for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
-    if(availableLots(rid).reduce((a,b)=>a+Number(b.remaining),0)<qty)return alert(`Not enough ${resource(rid).name}. Record a delivery first.`);
+    if(availableLots(rid).reduce((a,b)=>a+Number(b.remaining),0)<qty)return alert(`Not enough ${resource(rid)?.name||rid}. Record a delivery first.`);
   }
-  const code=batchCode(blendId,date),inputs=[];
+  const code=batchCode(item.blendId,d.date),inputs=[];
   for(const x of selected){
-    consumeLot(x.lot.id,x.req.required,code,date,x.req.resourceId);
-    inputs.push({resourceId:x.req.resourceId,name:resource(x.req.resourceId).name,qty:x.req.required,unit:resource(x.req.resourceId).unit,supplierBatch:x.lot.supplierBatch,lotId:x.lot.id});
+    consumeLot(x.l.id,x.required,code,d.date,x.rid);
+    inputs.push({resourceId:x.rid,name:resource(x.rid)?.name||x.rid,qty:x.required,unit:resource(x.rid)?.unit||"g",supplierBatch:x.l.supplierBatch,lotId:x.l.id});
   }
   for(const rid of ["pouch","frontlabel","backlabel","desiccant"]){
-    const result=consumeFifo(rid,qty,code,date);
-    result.uses.forEach(u=>inputs.push({resourceId:rid,name:resource(rid).name,qty:u.qty,unit:resource(rid).unit,supplierBatch:u.supplierBatch,lotId:u.lotId}));
+    const result=consumeFifo(rid,qty,code,d.date);
+    result.uses.forEach(u=>inputs.push({resourceId:rid,name:resource(rid)?.name||rid,qty:u.qty,unit:resource(rid)?.unit||"item",supplierBatch:u.supplierBatch,lotId:u.lotId}));
   }
-  stock(blendId).qty+=qty;
-  db.movements.push({id:uid("MOV"),date,type:"FINISHED IN",blendId,resourceId:"",qty,batchCode:code,notes:"Production completed"});
-  const currentCost=blendCost(blendId); db.productionRuns.push({id:uid("RUN"),date,blendId,qty,batchCode:code,notes,completedBy,inputs,remaining:qty,recipeSnapshot:clone(db.recipes[blendId]),costSnapshot:{ingredientCost:currentCost.ingredientCost,packagingCost:currentCost.packagingCost,costPerPouch:currentCost.total,totalBatchCost:currentCost.total*qty}}); logActivity("Production completed",`${code}: ${qty} ${blend(blendId).name}`);
-  preparedProduction=null;save();alert(`Production complete. Batch ${code} created.`);render()
+  stock(item.blendId).qty+=qty;
+  db.movements.push({id:uid("MOV"),date:d.date,type:"FINISHED IN",blendId:item.blendId,resourceId:"",qty,batchCode:code,notes:"Production completed"});
+  const cost=blendCost(item.blendId);
+  db.productionRuns.push({id:uid("RUN"),planId:plan.id,planItemId:item.id,date:d.date,blendId:item.blendId,plannedQty:item.plannedQty,qty,batchCode:code,notes:d.notes,completedBy:d.completedBy,inputs,remaining:qty,recipeSnapshot:clone(recipe),costSnapshot:{ingredientCost:cost.ingredientCost,packagingCost:cost.packagingCost,costPerPouch:cost.total,totalBatchCost:cost.total*qty},wastage:Number(d.wastage||0),wastageReason:d.wastageReason||"",haccpRecordIds:haccpForDate(d.date)});
+  item.status="Completed";item.actualQty=qty;item.batchCode=code;item.completedDate=d.date;
+  updatePlanStatus(plan);db.productionDraft=null;
+  logActivity("Production completed",`${code}: ${qty} ${blend(item.blendId)?.name||item.blendId}`,d.date);
+  save();alert(`Batch complete: ${code}`);render();
 }
 
 function customersView(){
@@ -334,21 +493,28 @@ window.addOpeningBalance=()=>saveLot("Opening Balance")
 
 function traceabilityView(){
   app.innerHTML=`<section class="card"><h2>Traceability Search</h2><label>Finished batch, supplier batch, blend or customer</label>
-  <input id="traceSearch" placeholder="e.g. GH-150726 or GAR-240701-A"><button onclick="runTrace()">Search</button></section><div id="traceResults"></div>`;
+  <input id="traceSearch" placeholder="e.g. GH-160726 or GAR-240701-A"><button onclick="runTrace()">Search</button></section><div id="traceResults"></div>`;
 }
 window.runTrace=()=>{
   const q=document.getElementById("traceSearch").value.toLowerCase().trim();
   const runs=db.productionRuns.filter(r=>{
     const cust=db.orders.filter(o=>o.batchCode===r.batchCode).map(o=>db.customers.find(c=>c.id===o.customerId)?.business||"").join(" ");
     const supplier=(r.inputs||r.ingredients||[]).map(i=>i.supplierBatch||"").join(" ");
-    return [r.batchCode,blend(r.blendId).name,r.date,cust,supplier].join(" ").toLowerCase().includes(q);
+    return [r.batchCode,blend(r.blendId)?.name||"",r.date,cust,supplier,r.completedBy||""].join(" ").toLowerCase().includes(q);
   });
   document.getElementById("traceResults").innerHTML=runs.map(r=>{
     const outs=db.orders.filter(o=>o.batchCode===r.batchCode),inputs=r.inputs||r.ingredients||[];
-    return `<section class="card"><h3>${r.batchCode} · ${blend(r.blendId).name}</h3>
-    <p><b>Made:</b> ${r.date} · <b>By:</b> ${esc(r.completedBy||"")} · <b>Made:</b> ${r.qty} · <b>Remaining:</b> ${r.remaining}</p>
-    <h4>Exact supplier lots used</h4><table><tr><th>Resource</th><th>Qty</th><th>Supplier batch</th></tr>
-    ${inputs.map(i=>`<tr><td>${esc(i.name)}</td><td>${fmt(i.qty)} ${i.unit}</td><td><b>${esc(i.supplierBatch)}</b></td></tr>`).join("")}</table>
+    const linked=(r.haccpRecordIds||[]).map(id=>db.haccp.find(h=>h.id===id)).filter(Boolean);
+    const plan=db.productionPlans.find(p=>p.id===r.planId);
+    return `<section class="card"><h3>${esc(r.batchCode)} · ${esc(blend(r.blendId)?.name||r.blendId)}</h3>
+    <p><b>Production plan:</b> ${esc(plan?.name||"Standalone / opening stock")}</p>
+    <p><b>Made:</b> ${r.date} · <b>Operator:</b> ${esc(r.completedBy||"")} · <b>Planned:</b> ${r.plannedQty||r.qty} · <b>Actual:</b> ${r.qty} · <b>Remaining:</b> ${r.remaining}</p>
+    <p><b>Wastage:</b> ${Number(r.wastage||0)} ${r.wastageReason?`· ${esc(r.wastageReason)}`:""}</p>
+    <h4>Exact supplier lots used</h4><table><tr><th>Resource</th><th>Quantity</th><th>Supplier batch</th></tr>
+    ${inputs.map(i=>`<tr><td>${esc(i.name)}</td><td>${fmt(i.qty)} ${esc(i.unit)}</td><td><b>${esc(i.supplierBatch)}</b></td></tr>`).join("")}</table>
+    <h4>Recipe snapshot</h4><table><tr><th>Ingredient</th><th>Per pouch</th></tr>
+    ${Object.entries(r.recipeSnapshot||{}).map(([rid,qty])=>`<tr><td>${esc(resource(rid)?.name||rid)}</td><td>${fmt(qty)} ${esc(resource(rid)?.unit||"g")}</td></tr>`).join("")}</table>
+    <h4>Linked HACCP records</h4>${linked.length?`<table><tr><th>Type</th><th>Result</th><th>By</th><th>Notes</th></tr>${linked.map(h=>`<tr><td>${esc(h.type)}</td><td>${esc(h.result)}</td><td>${esc(h.by)}</td><td>${esc(h.notes)}</td></tr>`).join("")}</table>`:"<p>No HACCP records were recorded on this production date.</p>"}
     <h4>Customers supplied</h4>${outs.length?`<table><tr><th>Date</th><th>Customer</th><th>Qty</th></tr>${outs.map(o=>`<tr><td>${o.date}</td><td>${esc(db.customers.find(c=>c.id===o.customerId)?.business||"")}</td><td>${o.qty}</td></tr>`).join("")}</table>`:"<p>None recorded.</p>"}</section>`;
   }).join("")||`<section class="card">No matching traceability record.</section>`;
 }
@@ -418,12 +584,12 @@ window.saveSettings=()=>{db.settings={businessName:document.getElementById("setB
 window.saveBlendPrice=id=>{const b=blend(id);b.wholesale=Number(document.getElementById("wh-"+id).value);b.retail=Number(document.getElementById("rt-"+id).value);b.market=Number(document.getElementById("mk-"+id).value);save();logActivity("Selling prices updated",b.name);render()}
 
 function backupView(){
-  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
+  app.innerHTML=`<section class="card"><h2>Backup & Transfer</h2><p><b>App version:</b> 1.1 Connected Production</p><div class="notice"><b>Current version:</b> data is stored on this device. Export a backup regularly. Live multi-device sync is not connected yet.</div>
   <div class="actions"><button onclick="exportBackup()">Export full backup</button><button class="secondary" onclick="document.getElementById('importFile').click()">Import backup</button><input hidden id="importFile" type="file" accept=".json" onchange="importBackup(event)"><button class="danger" onclick="resetApp()">Reset all data</button></div>
   <p>${db.productionRuns.length} batches · ${db.ingredientBatches.length} supplier lots · ${db.orders.length} orders · ${db.haccp.length} HACCP records · ${(db.activity||[]).length} activity entries</p></section>`;
 }
 window.exportBackup=()=>{const blob=new Blob([JSON.stringify(db,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`craic-hq-backup-${today()}.json`;a.click();URL.revokeObjectURL(a.href)}
-window.importBackup=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{db=JSON.parse(r.result);save();render();alert("Backup imported.")}catch{alert("Invalid backup file.")}};r.readAsText(f)}
+window.importBackup=e=>{const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{try{db=JSON.parse(r.result);if(!Array.isArray(db.productionPlans))db.productionPlans=[];if(db.productionDraft===undefined)db.productionDraft=null;save();render();alert("Backup imported.")}catch{alert("Invalid backup file.")}};r.readAsText(f)}
 window.resetApp=()=>{if(confirm("Delete all Craic HQ data on this device?")){db=clone(seed);save();render()}}
 
 if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
